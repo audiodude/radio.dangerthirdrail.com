@@ -5,6 +5,7 @@ Pure and stdlib-only. Durations are passed in as data (so the core is testable
 without media); the CLI wrapper fills them via ffprobe.
 """
 import json
+import math
 import os
 import random
 import subprocess
@@ -30,7 +31,22 @@ def shuffle(items: list, seed: int, no_repeat: bool = False) -> list:
     return out
 
 
-def build_music_timeline(ordered: list[dict], target_dur: float) -> list[dict]:
+def playlist(library: list, seed: int):
+    """Endless seeded shuffle: a fresh pass each time the library runs out, so a
+    show longer than the library still fills its target (no song twice in a row
+    across a pass seam)."""
+    rng = random.Random(f"music:{seed}")
+    prev = None
+    while True:
+        order = list(library)
+        rng.shuffle(order)
+        if len(order) > 1 and order[0] == prev:
+            order[0], order[-1] = order[-1], order[0]
+        yield from order
+        prev = order[-1]
+
+
+def build_music_timeline(ordered, target_dur: float) -> list[dict]:
     tl = []
     t = 0.0
     for trk in ordered:
@@ -59,7 +75,9 @@ def ffprobe_duration(path: str) -> float:
     return float(out.stdout.strip())
 
 
-def build_edl(pieces, idents, boundaries, show_dur, dwell, straddle) -> list[dict]:
+def build_edl(pieces, idents, boundaries, show_dur, dwell, straddle, rng) -> list[dict]:
+    """rng picks each piece segment's in-point, so a piece that recurs through the
+    show doesn't always open on the same frames. Idents always play from 0."""
     edl = []
     t = 0.0
     pi = ii = 0
@@ -67,8 +85,7 @@ def build_edl(pieces, idents, boundaries, show_dur, dwell, straddle) -> list[dic
         piece = pieces[pi % len(pieces)]; pi += 1
         cut_at = next((b for b in boundaries if b >= t + dwell), None)
         if cut_at is None or cut_at >= show_dur:
-            edl.append({"kind": "piece", "src": piece["src"], "in": 0.0,
-                        "out": round(show_dur - t, 3), "tl_start": round(t, 3)})
+            edl.append(_piece_seg(piece, show_dur - t, t, rng))
             break
         ident = idents[ii % len(idents)]; ii += 1
         if straddle:
@@ -76,13 +93,19 @@ def build_edl(pieces, idents, boundaries, show_dur, dwell, straddle) -> list[dic
         else:
             istart, iend = cut_at, cut_at + ident["dur"]
         istart = max(istart, t)
-        edl.append({"kind": "piece", "src": piece["src"], "in": 0.0,
-                    "out": round(istart - t, 3), "tl_start": round(t, 3)})
+        edl.append(_piece_seg(piece, istart - t, t, rng))
         edl.append({"kind": "ident", "src": ident["src"], "in": 0.0,
                     "out": round(min(ident["dur"], show_dur - istart), 3),
                     "tl_start": round(istart, 3)})
         t = iend
     return edl
+
+
+def _piece_seg(piece, length, tl_start, rng) -> dict:
+    slack = max(0.0, float(piece["dur"]) - length)
+    start = math.floor(rng.uniform(0.0, slack) * 1000) / 1000   # floor: never past EOF
+    return {"kind": "piece", "src": piece["src"], "in": start,
+            "out": round(length, 3), "tl_start": round(tl_start, 3)}
 
 
 def _sha(parts) -> str:
@@ -113,9 +136,8 @@ def build_plan(catalog: dict, library: list[dict], config: dict) -> dict:
             f"no songs fit the DWELL constraint: dwell({dwell}) + every song "
             f"> min_piece({min_piece:.1f}). Lower dwell_sec or use longer pieces.")
 
-    # Music: shuffle (seeded, no immediate repeat), build timeline to >= show_dur.
-    ordered = shuffle(library, seed=seed, no_repeat=True)
-    timeline = build_music_timeline(ordered, target_dur=show_dur)
+    # Music: endless seeded shuffle, timeline built to >= show_dur.
+    timeline = build_music_timeline(playlist(library, seed), target_dur=show_dur)
     real_dur = timeline[-1]["end"] if timeline else 0.0   # exact end of the audio
     boundaries = song_boundaries(timeline)
     subs = build_subtitles(timeline)
@@ -124,7 +146,8 @@ def build_plan(catalog: dict, library: list[dict], config: dict) -> dict:
                      seed=seed + 1, no_repeat=True)
     idents = shuffle([{"src": i["file"], "dur": float(i["dur"])} for i in catalog["idents"]],
                      seed=seed + 2)
-    edl = build_edl(pieces, idents, boundaries, real_dur, dwell, straddle)
+    edl = build_edl(pieces, idents, boundaries, real_dur, dwell, straddle,
+                    rng=random.Random(f"edl:{seed}"))
 
     return {
         "seed": seed,

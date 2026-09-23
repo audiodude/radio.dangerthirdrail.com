@@ -1,5 +1,5 @@
 import json
-import os, sys
+import os, random, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import plan
 
@@ -42,7 +42,8 @@ def test_edl_cuts_at_first_boundary_after_dwell():
     pieces = [_piece("p0.mp4", 1200.0), _piece("p1.mp4", 1200.0)]
     idents = [_piece("id.mp4", 12.0)]
     boundaries = [180.0, 360.0, 540.0, 720.0]   # songs every 180s
-    edl = plan.build_edl(pieces, idents, boundaries, show_dur=2000.0, dwell=300.0, straddle=True)
+    edl = plan.build_edl(pieces, idents, boundaries, show_dur=2000.0, dwell=300.0, straddle=True,
+                         rng=random.Random(0))
     # first piece: dwell 300 -> first boundary >=300 is 360; ident straddles 360
     assert edl[0]["kind"] == "piece" and edl[0]["tl_start"] == 0.0
     assert edl[0]["out"] == 354.0                 # 360 - 12/2 - 0
@@ -52,7 +53,8 @@ def test_edl_cuts_at_first_boundary_after_dwell():
 def test_edl_final_piece_runs_to_show_end_without_ident():
     pieces = [_piece("p0.mp4", 5000.0)]
     idents = [_piece("id.mp4", 12.0)]
-    edl = plan.build_edl(pieces, idents, boundaries=[], show_dur=400.0, dwell=300.0, straddle=True)
+    edl = plan.build_edl(pieces, idents, boundaries=[], show_dur=400.0, dwell=300.0, straddle=True,
+                         rng=random.Random(0))
     assert len(edl) == 1 and edl[0]["kind"] == "piece"
     assert edl[0]["tl_start"] == 0.0 and edl[0]["out"] == 400.0
 
@@ -60,13 +62,28 @@ def test_edl_covers_full_show():
     pieces = [_piece(f"p{i}.mp4", 1200.0) for i in range(5)]
     idents = [_piece("id.mp4", 12.0)]
     boundaries = [i * 180.0 for i in range(1, 80)]
-    edl = plan.build_edl(pieces, idents, boundaries, show_dur=3600.0, dwell=600.0, straddle=True)
+    edl = plan.build_edl(pieces, idents, boundaries, show_dur=3600.0, dwell=600.0, straddle=True,
+                         rng=random.Random(0))
     last = edl[-1]
     assert abs((last["tl_start"] + last["out"]) - 3600.0) < 0.05    # timeline reaches show end
-    # piece segments never exceed their source duration
+    # piece segments stay inside their source, and don't all open on frame 0
     for seg in edl:
         if seg["kind"] == "piece":
-            assert seg["out"] <= 1200.0 + 1e-6
+            assert seg["in"] >= 0.0 and seg["in"] + seg["out"] <= 1200.0 + 1e-6
+    assert any(seg["in"] > 0.0 for seg in edl if seg["kind"] == "piece")
+
+def test_build_plan_fills_show_longer_than_library():
+    # library is 5 x 200 s = 1000 s; the show must still reach its target by
+    # re-shuffling, never playing the same song twice in a row.
+    catalog = {"pieces": [{"file": "/c/p0.mp4", "dur": 1200.0}],
+               "idents": [{"file": "/c/id.mp4", "dur": 12.0}]}
+    library = [{"file": f"/m/s{i}.mp3", "title": f"S{i}", "dur": 200.0} for i in range(5)]
+    cfg = {"seed": 7, "show_dur_sec": 3600.0, "dwell_sec": 600.0,
+           "fps": 60, "resolution": "1280x720", "straddle": True}
+    p = plan.build_plan(catalog, library, cfg)
+    assert p["show_dur_sec"] >= 3600.0
+    files = [m["file"] for m in p["music"]]
+    assert all(a != b for a, b in zip(files, files[1:]))
 
 def test_build_plan_deterministic_and_constraint():
     catalog = {"pieces": [{"file": f"/c/p{i}.mp4", "dur": 1200.0} for i in range(4)],
@@ -93,7 +110,7 @@ def test_build_plan_excludes_songs_that_bust_the_dwell_budget():
            "fps": 60, "resolution": "1280x720", "straddle": True}
     p = plan.build_plan(catalog, library, cfg)
     assert p["excluded_songs"] == ["/m/epic.mp3"]           # 30 + 540 > 300
-    assert [m["file"] for m in p["music"]] == ["/m/ok.mp3"]  # only the fitting song
+    assert {m["file"] for m in p["music"]} == {"/m/ok.mp3"}  # only the fitting song
     for seg in p["edl"]:
         if seg["kind"] == "piece":
             assert seg["out"] <= 300.0 + 1e-6
