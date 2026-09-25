@@ -16,7 +16,9 @@ def _log(msg):
 def _request(url, payload=None):
     if not BOX_HEALTH_URL or not BOX_HEALTH_TOKEN:
         return None
-    headers = {"Authorization": f"Bearer {BOX_HEALTH_TOKEN}"}
+    # Identify the service: the public edge challenges urllib's generic agent.
+    headers = {"Authorization": f"Bearer {BOX_HEALTH_TOKEN}",
+               "User-Agent": "DangerThirdRailMonitor/1.0"}
     data = None
     if payload is not None:
         headers["Content-Type"] = "application/json"

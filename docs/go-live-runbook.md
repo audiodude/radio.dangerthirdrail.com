@@ -119,7 +119,7 @@ safe — playout idles until 11:45 PT and the monitor sleeps to the next boundar
 ## Verify (during the window)
 
 - `ssh radio-playout 'systemctl status radio-playout'` — FFmpeg streaming the opening/show through one master connection.
-- `curl -H "Authorization: Bearer $BOX_HEALTH_TOKEN" https://radio-sys.dangerthirdrail.com/health` — `playout_alive`, `ffmpeg_alive`, fresh `heartbeat_age_s`, and `opening`.
+- `curl -A DangerThirdRailMonitor/1.0 -H "Authorization: Bearer $BOX_HEALTH_TOKEN" https://radio-sys.dangerthirdrail.com/health` — `playout_alive`, `ffmpeg_alive`, fresh `heartbeat_age_s`, and `opening`.
 - YouTube Studio: stream `active` → broadcast `live` during the countdown.
 - `opening.phase`: `countdown` → `waiting` → `ident` → `show`; `released` becomes true only after observed live confirmation. A late confirmation holds at zero, without consuming the song.
 - `radio.dangerthirdrail.com` redirects to the live video from 12:00 PT; the complete first song follows the opening ident after the countdown.

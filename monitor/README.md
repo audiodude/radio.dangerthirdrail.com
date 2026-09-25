@@ -36,6 +36,10 @@ is `{run_id, phase, released}` (or `null` when unavailable); phases are
 Both POST endpoints use the same bearer token and origin as `BOX_HEALTH_URL`;
 the tunnel must route `/opening/*` as well as `/health`. Commands are scoped to
 the transport UUID, so delayed commands from a prior connection are rejected.
+The client identifies itself as `DangerThirdRailMonitor/1.0`: Cloudflare
+challenged Python's default user agent during production rollout. Public health
+and control requests must use this service identity; bearer authentication is
+still required, and no zone-wide security bypass is needed.
 `PLAYOUT_STATE`, `PLAYOUT_RELEASE`, and `PLAYOUT_RESTART` must match between
 the box's health and playout services if their default `/tmp/playout_*.json`
 paths are overridden. See the [runbook](../docs/go-live-runbook.md) for rollout.
