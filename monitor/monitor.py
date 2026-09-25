@@ -42,6 +42,10 @@ def execute(action):
         redirect.set_radio_online(action[1])
     elif kind == "redirect_offline":
         redirect.set_radio_offline()
+    elif kind == "release_opening":
+        boxhealth.release_opening(action[1])
+    elif kind == "restart_opening":
+        boxhealth.restart_opening(action[1])
 
 
 def classify(in_op, in_consumer, live, stream_active, degraded_polls):
@@ -68,6 +72,8 @@ def main():
         now = datetime.datetime.now(UTC)
         in_op = windows.in_operational_window()
         in_consumer = windows.in_consumer_window()
+        box = boxhealth.probe() if in_op else None
+        opening = box.get("opening") if box is not None else None
 
         STREAM_ID = youtube.get_owned_stream_id()
         if STREAM_ID is None:
@@ -83,7 +89,7 @@ def main():
         cur_vid = redirect.current_video_id()
 
         actions = reconcile.plan_actions(now, in_op, in_consumer, STREAM_ID,
-                                         broadcasts, stream_active, cur_vid)
+                                         broadcasts, stream_active, cur_vid, opening)
         for a in actions:
             try:
                 execute(a)
@@ -98,7 +104,6 @@ def main():
         state = classify(in_op, in_consumer, live, stream_active, degraded_polls)
         reason = f"stream={ss or 'none'}, live={'yes' if live else 'no'}"
         if state == "DEGRADED":
-            box = boxhealth.probe()
             reason += "; box=" + ("unreachable" if box is None else "alive")
         alerter.update(state, reason)
 

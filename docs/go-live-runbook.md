@@ -2,6 +2,9 @@
 
 The steady state: **render → S3 catalog → nightly bake (03:00 PT) → window-gated
 playout (11:45–18:05 PT) → monitor owns the YouTube broadcast + redirect.**
+Playout starts with a **16-minute silent countdown**, then a complete ident,
+then the first song from its beginning. A normal 11:45 start reaches zero at
+12:01 PT; the radio redirect still opens at noon.
 
 ## Add content (render host, needs the GPU)
 
@@ -32,8 +35,74 @@ that drops 3 of 165 tracks. Want the long tracks on air? Render longer pieces.
     ssh radio-playout 'sudo systemctl start radio-bake.service'   # ~2.5 h for a 6 h show
     ssh radio-playout 'journalctl -u radio-bake -f'
 
-Output: `/data/shows/show-<date>.mkv` + `.plan.json`, published to S3, with
-`/data/shows/LATEST` naming the current show. `RETENTION_DAYS=3`.
+Output: `/data/shows/show-<date>.mkv` + `.plan.json`, plus `.countdown.mkv`,
+`.hold.mkv`, `.ident.mkv`, and `.opening.json`. The opening manifest records
+each segment's filename and timeline duration, including AAC preroll/padding
+needed for non-overlapping packet timestamps. The visible countdown is exactly
+960 seconds. All assets are published to S3 before
+`/data/shows/LATEST` is updated. `RETENTION_DAYS=3` covers the whole bundle.
+At 6 Mbps, the countdown adds approximately 720 MB per show.
+
+The opening ident is the first ident source in the seeded plan, played in full
+from zero regardless of its interior EDL slot. Its own audio is retained if
+present; otherwise it is silent. First-song audio begins only after it finishes.
+
+## Startup safety and rollout
+
+`playout.sh` launches `playout.py`. One FFmpeg connection stream-copies the
+countdown, zero hold, ident, and show; no reconnect occurs at their boundaries.
+The countdown displays `Danger Third Rail Radio` and `HH:MM:SS`.
+At zero, playout continues silent zero frames until the monitor confirms the
+owned broadcast is listed `live` and the stream is active. A transition request
+or `testing` state cannot release the ident or music.
+
+Each transport attempt has a new UUID. The authenticated health service exposes
+`opening: {run_id, phase, released}` and accepts matching-UUID commands at
+`POST /opening/release` and `/opening/restart`. Late commands for an earlier
+connection return 409. If a new broadcast is needed after an opening has already
+been released, the monitor restarts the opening before making it live.
+Missing box state or opening assets fails closed; there is no direct-show fallback.
+
+Deploy the updated bake scripts, playout scripts, health service, and Railway
+monitor together, preferably outside the operational window:
+
+1. Update `/opt/radio/scripts/bake/` and `/opt/radio/scripts/broadcast/` on the
+   box. Keep playout stopped during an in-window rollout.
+2. Generate opening assets for the current show before enabling the new runtime.
+   A full bake does this automatically. To keep an existing show without rebaking
+   its music/video, run on the box:
+
+       SHOW="$(cat /data/shows/LATEST)"
+       sudo systemd-run --wait --collect -p EnvironmentFile=/etc/radio.env \
+         /usr/bin/python3 /opt/radio/scripts/bake/opening.py \
+         --plan "/data/shows/${SHOW%.mkv}.plan.json" --show "/data/shows/$SHOW"
+
+   This requires the plan's ident source to remain available locally. Publish
+   the new opening bundle alongside the show if restoring shows from S3.
+3. Ensure the cloudflared route for `radio-sys.dangerthirdrail.com` forwards
+   `/opening/*` to the health service as well as `/health`. Restart
+   `radio-health.service` and `radio-playout.service`.
+4. Deploy the monitor through the normal `main` → `release` merge and push.
+   An old health service blocks the new monitor; an old monitor leaves the new
+   playout holding at zero. Complete both sides before expecting music.
+
+The health and playout services share these paths (override both services
+identically if needed):
+
+| Environment variable | Default |
+|---|---|
+| `PLAYOUT_STATE` | `/tmp/playout_state.json` |
+| `PLAYOUT_RELEASE` | `/tmp/playout_release.json` |
+| `PLAYOUT_RESTART` | `/tmp/playout_restart.json` |
+| `PLAYOUT_HEARTBEAT` | `/tmp/playout_heartbeat` |
+
+`SHOWS_DIR` defaults to `/data/shows`. For isolated local runs, `OUTPUT` writes
+FLV to a file instead of YouTube and does not require `YOUTUBE_STREAM_KEY`;
+`WINDOW_CMD=true` bypasses the schedule. Use private paths for all four state
+files above. The live-confirmation gate still applies to local output.
+The decoded-media and local HTTP regression suite exercises it without YouTube:
+
+    uv run --with pytest --with boto3 python -m pytest monitor/tests scripts/broadcast/tests scripts/bake/tests -q
 
 ## Go live
 
@@ -49,10 +118,11 @@ safe — playout idles until 11:45 PT and the monitor sleeps to the next boundar
 
 ## Verify (during the window)
 
-- `ssh radio-playout 'systemctl status radio-playout'` — ffmpeg running, streaming `/data/shows/show-*.mkv`.
-- `curl -H "Authorization: Bearer $BOX_HEALTH_TOKEN" https://radio-sys.dangerthirdrail.com/health` — `playout_alive`, `ffmpeg_alive`, fresh `heartbeat_age_s`.
-- YouTube Studio: stream `active` → broadcast `live`.
-- `radio.dangerthirdrail.com` redirects to the live video from 12:00 PT.
+- `ssh radio-playout 'systemctl status radio-playout'` — FFmpeg streaming the opening/show through one master connection.
+- `curl -H "Authorization: Bearer $BOX_HEALTH_TOKEN" https://radio-sys.dangerthirdrail.com/health` — `playout_alive`, `ffmpeg_alive`, fresh `heartbeat_age_s`, and `opening`.
+- YouTube Studio: stream `active` → broadcast `live` during the countdown.
+- `opening.phase`: `countdown` → `waiting` → `ident` → `show`; `released` becomes true only after observed live confirmation. A late confirmation holds at zero, without consuming the song.
+- `radio.dangerthirdrail.com` redirects to the live video from 12:00 PT; the complete first song follows the opening ident after the countdown.
 - At 18:05 PT: box stops → broadcast completes → redirect goes offline.
 
 ## Kill switch
@@ -60,6 +130,6 @@ safe — playout idles until 11:45 PT and the monitor sleeps to the next boundar
     ssh radio-playout 'sudo systemctl stop radio-playout'          # off air now
     ssh radio-playout 'sudo systemctl disable radio-playout radio-bake.timer'
 
-Stopping playout ends the stream; the monitor completes the broadcast on its
-next poll (≤2 min). Never restart playout twice concurrently — `playout.sh`
-holds `/tmp/playout.lock` for exactly that reason.
+Stopping playout stops sending media immediately. The monitor completes the
+broadcast at the operational window's end. Run playout only through its single
+systemd service; do not launch a second writer to the same stream key/state files.

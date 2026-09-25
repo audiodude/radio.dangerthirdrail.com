@@ -166,7 +166,32 @@ Startup order matters: pipe writers (music player, video player) first, master f
 last — pipe opens block until both ends exist. Roadmap (Railway playout service, cloud
 rendering, 50-piece catalog): see `TODO.md`.
 
-## Deployment
+## Pre-baked broadcast opening
+
+Production playout uses `scripts/bake/` and `scripts/broadcast/` (see the
+[go-live runbook](docs/go-live-runbook.md)), rather than the raw-pipe player above.
+Each broadcast opens with **16 minutes of silent countdown**, displaying
+`Danger Third Rail Radio` and `HH:MM:SS`, followed by a **complete opening ident**,
+then the first song from the beginning. The first song never plays underneath
+the countdown or ident. An ident's own audio, if present, is retained.
+
+YouTube may become live partway through the countdown. At zero, playout waits
+for the monitor to observe the owned broadcast as `live` with an active stream;
+a successful transition request alone is not enough. The countdown, zero hold,
+ident, and show share one stream-copy RTMP connection. Restarting the transport
+starts a fresh countdown, and stale release commands cannot unlock the new run.
+The monitor resets an already-used opening before publishing another broadcast.
+
+The nightly bake publishes `.countdown.mkv`, `.hold.mkv`, `.ident.mkv`, and
+`.opening.json` beside each show. A show without these opening assets is refused,
+not streamed directly. Existing shows require opening generation before rollout;
+see the runbook for deployment order and local-output verification.
+
+
+## Legacy Galton deployment
+
+The following describes the older Galton service stack. Current pre-baked
+playout deployment is documented in the [go-live runbook](docs/go-live-runbook.md).
 
 Railway auto-deploys both services from the `release` branch (not `main`). Push to `main` for development, then merge to `release` to deploy.
 
