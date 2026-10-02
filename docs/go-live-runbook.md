@@ -55,6 +55,11 @@ The countdown and zero hold use the website title-card styling: two bold red
 uppercase title lines, a white `HH:MM:SS` timer, and the gray
 `radio.dangerthirdrail.com` domain, centered on black. Styling changes require
 regenerating the opening assets; already-baked videos do not update automatically.
+The bake host needs an Arial-compatible font: install `fonts-liberation` with
+`sudo apt-get install -y fonts-liberation`; `fc-match Arial` should select
+Liberation Sans. To deploy a styling-only update, replace
+`/opt/radio/scripts/bake/opening.py` before the next nightly bake; no playout
+restart or current-show regeneration is needed.
 At zero, playout continues silent zero frames until the monitor confirms the
 owned broadcast is listed `live` and the stream is active. A transition request
 or `testing` state cannot release the ident or music.
