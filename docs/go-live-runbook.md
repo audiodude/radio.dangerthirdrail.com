@@ -51,7 +51,10 @@ present; otherwise it is silent. First-song audio begins only after it finishes.
 
 `playout.sh` launches `playout.py`. One FFmpeg connection stream-copies the
 countdown, zero hold, ident, and show; no reconnect occurs at their boundaries.
-The countdown displays `Danger Third Rail Radio` and `HH:MM:SS`.
+The countdown and zero hold use the website title-card styling: two bold red
+uppercase title lines, a white `HH:MM:SS` timer, and the gray
+`radio.dangerthirdrail.com` domain, centered on black. Styling changes require
+regenerating the opening assets; already-baked videos do not update automatically.
 At zero, playout continues silent zero frames until the monitor confirms the
 owned broadcast is listed `live` and the stream is active. A transition request
 or `testing` state cannot release the ident or music.

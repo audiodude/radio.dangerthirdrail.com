@@ -37,6 +37,23 @@ def _ass_time(seconds):
 
 def _write_countdown_ass(path, resolution, seconds, *, hold=False):
     width, height = map(int, resolution.split("x"))
+    # Match assets/radio-offline.html at 1280x720, scaling for bake resolution.
+    scale = min(width / 1280, height / 720)
+    title_size, timer_size, domain_size = (size * scale for size in (120, 32, 20))
+    line_height = title_size * 1.05
+    timer_gap, domain_gap = 29 * scale, 14 * scale
+    block_height = 2 * line_height + timer_gap + timer_size + domain_gap + domain_size
+    top = (height - block_height) / 2
+    styles = ""
+    for name, size, color, bold, spacing in (
+        ("title", title_size, "&H002A2AFF", -1, -0.01 * title_size),
+        ("timer", timer_size, "&H00FFFFFF", 0, 0),
+        ("domain", domain_size, "&H00888888", 0, 0.02 * domain_size),
+    ):
+        styles += (
+            f"Style: {name},Arial,{size:g},{color},{color},"
+            f"&H00000000,&H00000000,{bold},0,0,0,100,100,{spacing:g},0,"
+            "1,0,0,8,0,0,0,1\n")
     header = (
         "[Script Info]\nScriptType: v4.00+\n"
         f"PlayResX: {width}\nPlayResY: {height}\n\n"
@@ -45,18 +62,29 @@ def _write_countdown_ass(path, resolution, seconds, *, hold=False):
         "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, "
         "ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, "
         "MarginL, MarginR, MarginV, Encoding\n"
-        f"Style: opening,DejaVu Sans,{height / 16:g},&H00FFFFFF,&H00FFFFFF,"
-        "&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,5,0,0,0,1\n\n"
+        f"{styles}\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
     with open(path, "w") as out:
         out.write(header)
+        for text, y in (
+            ("DANGER THIRD RAIL", top),
+            ("RADIO", top + line_height),
+        ):
+            out.write(
+                f"Dialogue: 0,{_ass_time(0)},{_ass_time(seconds)},title,,0,0,0,,"
+                f"{{\\pos({width / 2:g},{y:g})}}{text}\n")
+        timer_y = top + 2 * line_height + timer_gap
+        out.write(
+            f"Dialogue: 0,{_ass_time(0)},{_ass_time(seconds)},domain,,0,0,0,,"
+            f"{{\\pos({width / 2:g},{timer_y + timer_size + domain_gap:g})}}"
+            "radio.dangerthirdrail.com\n")
         for elapsed in range(seconds):
             remaining = 0 if hold else seconds - elapsed
             timer = f"{remaining // 3600:02d}:{remaining // 60 % 60:02d}:{remaining % 60:02d}"
             out.write(
                 f"Dialogue: 0,{_ass_time(elapsed)},{_ass_time(elapsed + 1)},"
-                f"opening,,0,0,0,,Danger Third Rail Radio\\N{timer}\n")
+                f"timer,,0,0,0,,{{\\pos({width / 2:g},{timer_y:g})}}{timer}\n")
 
 
 def _encode(inputs, video_filter, audio_map, duration, target, fps):

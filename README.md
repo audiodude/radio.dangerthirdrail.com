@@ -170,10 +170,12 @@ rendering, 50-piece catalog): see `TODO.md`.
 
 Production playout uses `scripts/bake/` and `scripts/broadcast/` (see the
 [go-live runbook](docs/go-live-runbook.md)), rather than the raw-pipe player above.
-Each broadcast opens with **16 minutes of silent countdown**, displaying
-`Danger Third Rail Radio` and `HH:MM:SS`, followed by a **complete opening ident**,
-then the first song from the beginning. The first song never plays underneath
-the countdown or ident. An ident's own audio, if present, is retained.
+Each broadcast opens with **16 minutes of silent countdown**, followed by a
+**complete opening ident**, then the first song from the beginning. The countdown
+and zero hold match the website title card: large red uppercase `DANGER THIRD RAIL`
+over `RADIO`, a white `HH:MM:SS` timer, and the gray domain on black.
+The first song never plays underneath the countdown or ident. An ident's own
+audio, if present, is retained.
 
 YouTube may become live partway through the countdown. At zero, playout waits
 for the monitor to observe the owned broadcast as `live` with an active stream;

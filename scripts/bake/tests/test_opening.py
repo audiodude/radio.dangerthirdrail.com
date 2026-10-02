@@ -3,6 +3,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -113,8 +114,10 @@ def test_countdown_text_reaches_one_then_zero_hold(baked_opening, tmp_path):
         subprocess.run([
             "ffmpeg", "-v", "error", "-ss", str(second),
             "-i", str(manifest_path.parent / manifest[name]["file"]),
-            "-frames:v", "1", str(image),
+            # Isolate the timer: full-card OCR ignores it beside the large title.
+            "-frames:v", "1", "-vf",
+            "crop=iw:ih*0.065:0:ih*0.64,scale=iw*4:ih*4,negate", str(image),
         ], check=True)
         text = subprocess.check_output([
-            "tesseract", str(image), "stdout", "--psm", "6"], text=True)
-        assert text.strip().splitlines() == ["Danger Third Rail Radio", expected]
+            "tesseract", str(image), "stdout", "--psm", "7"], text=True)
+        assert re.findall(r"\b\d{2}:\d{2}:\d{2}\b", text) == [expected]
