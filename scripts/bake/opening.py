@@ -119,12 +119,9 @@ def _build_opening(plan_path, show_path, *, countdown_seconds=COUNTDOWN_SECONDS)
         raise ValueError("countdown_seconds must be a positive integer")
     with open(plan_path) as source:
         plan = json.load(source)
-    # EDL order is already seeded by the planner. Never use the interior slot's
-    # in/out: it may truncate the ident at the end of the music timeline.
-    ident = next((entry for entry in plan["edl"] if entry["kind"] == "ident"), None)
-    if ident is None:
-        raise ValueError("opening requires an ident source in the plan EDL")
-    ident_source = Path(ident["src"]).resolve()
+    # The planner picks the opening ident (catalog `opening` flag). Probe the
+    # source: it always plays complete, from zero.
+    ident_source = Path(plan["opening_ident"]["src"]).resolve()
     ident_probe = _probe(ident_source)
     ident_duration = float(ident_probe["format"]["duration"])
     fps = int(plan["fps"])

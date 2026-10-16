@@ -43,9 +43,10 @@ needed for non-overlapping packet timestamps. The visible countdown is exactly
 `/data/shows/LATEST` is updated. `RETENTION_DAYS=3` covers the whole bundle.
 At 6 Mbps, the countdown adds approximately 720 MB per show.
 
-The opening ident is the first ident source in the seeded plan, played in full
-from zero regardless of its interior EDL slot. Its own audio is retained if
-present; otherwise it is silent. First-song audio begins only after it finishes.
+The opening ident is drawn by the planner from catalog idents flagged
+`"opening": true` (any ident if none are flagged) and played in full from zero.
+Its own audio is retained if present; otherwise it is silent. First-song audio
+begins only after it finishes.
 
 ## Startup safety and rollout
 

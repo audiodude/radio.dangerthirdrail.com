@@ -72,6 +72,54 @@ def test_edl_covers_full_show():
             assert seg["in"] >= 0.0 and seg["in"] + seg["out"] <= 1200.0 + 1e-6
     assert any(seg["in"] > 0.0 for seg in edl if seg["kind"] == "piece")
 
+def test_edl_audio_ident_is_a_break_between_songs():
+    pieces = [_piece(f"p{i}.mp4", 1200.0) for i in range(3)]
+    idents = [{"src": "loud.mp4", "dur": 20.0, "audio": True}]
+    boundaries = [180.0, 360.0, 540.0, 720.0, 900.0]
+    edl = plan.build_edl(pieces, idents, boundaries, show_dur=1000.0, dwell=300.0,
+                         straddle=True, rng=random.Random(0))
+    # cut at 360: piece runs to the boundary, ident fills [360, 380], no straddle
+    assert edl[0]["out"] == 360.0
+    assert edl[1] == {"kind": "ident", "src": "loud.mp4", "in": 0.0, "out": 20.0,
+                      "tl_start": 360.0, "audio": True}
+    assert edl[2]["tl_start"] == 380.0
+    # next cut: music boundary 720 is now at 740 in show time
+    assert edl[3]["tl_start"] == 740.0 and edl[3]["audio"]
+    last = edl[-1]
+    assert abs(last["tl_start"] + last["out"] - 1040.0) < 0.05   # show grew by both breaks
+
+    timeline = [{"start": float(s), "end": float(s + 180)} for s in range(0, 1000, 180)]
+    shifted = plan.apply_breaks(timeline, edl)
+    assert [(s["start"], s["end"]) for s in shifted[:5]] == [
+        (0.0, 180.0), (180.0, 360.0), (380.0, 560.0), (560.0, 740.0), (760.0, 940.0)]
+
+def test_edl_silent_ident_still_straddles_alongside_audio_idents():
+    pieces = [_piece("p0.mp4", 1200.0), _piece("p1.mp4", 1200.0)]
+    idents = [{"src": "quiet.mp4", "dur": 12.0, "weight": 1.0},
+              {"src": "loud.mp4", "dur": 20.0, "weight": 1e-9, "audio": True}]
+    edl = plan.build_edl(pieces, idents, [180.0, 360.0, 540.0], show_dur=600.0, dwell=300.0,
+                         straddle=True, rng=random.Random(0))
+    assert edl[1]["src"] == "quiet.mp4" and edl[1]["tl_start"] == 354.0 and "audio" not in edl[1]
+
+def test_ident_weights_set_draw_odds():
+    pieces = [_piece("p0.mp4", 1200.0), _piece("p1.mp4", 1200.0)]
+    idents = [{"src": "test.mp4", "dur": 12.0, "weight": 3.0},
+              {"src": "real.mp4", "dur": 12.0, "weight": 1.0}]
+    edl = plan.build_edl(pieces, idents, [i * 100.0 for i in range(1, 4001)], show_dur=400000.0,
+                         dwell=50.0, straddle=True, rng=random.Random(5))
+    picks = [s["src"] for s in edl if s["kind"] == "ident"]
+    share = picks.count("real.mp4") / len(picks)
+    assert len(picks) > 3000 and 0.22 < share < 0.28
+
+def test_opening_ident_is_drawn_from_flagged_idents_only():
+    idents = [{"src": "test.mp4", "dur": 12.0, "weight": 1000.0},
+              {"src": "real.mp4", "dur": 21.9, "weight": 1.0, "opening": True}]
+    assert {plan.pick_opening_ident(idents, random.Random(s))["src"] for s in range(50)} == {"real.mp4"}
+    # with none flagged, every ident is eligible
+    unflagged = [{"src": "a.mp4", "dur": 12.0}, {"src": "b.mp4", "dur": 12.0}]
+    assert {plan.pick_opening_ident(unflagged, random.Random(s))["src"] for s in range(50)} \
+        == {"a.mp4", "b.mp4"}
+
 def test_build_plan_fills_show_longer_than_library():
     # library is 5 x 200 s = 1000 s; the show must still reach its target by
     # re-shuffling, never playing the same song twice in a row.

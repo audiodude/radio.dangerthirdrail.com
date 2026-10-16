@@ -97,14 +97,21 @@ def _assemble(plan_path: str, out_path: str, work: str):
     # to identical PCM first, clamped to exactly the slot the plan gave it
     # (apad fills a short decode, -t trims a long one), which also stops decode
     # length from drifting away from the subtitle timings over 160+ songs.
+    # Audio idents (EDL segments flagged `audio`) are breaks between songs: the
+    # plan already shifted the music past them, so they slot into the same
+    # normalize-then-concat sequence in show-time order.
+    clips = [(float(s["start"]), s["file"], round(float(s["end"]) - float(s["start"]), 3))
+             for s in p["music"]]
+    clips += [(float(s["tl_start"]), s["src"], float(s["out"]))
+              for s in p["edl"] if s.get("audio")]
+    clips.sort(key=lambda c: c[0])
     norm = os.path.join(work, "audio")
     os.makedirs(norm, exist_ok=True)
     alist = os.path.join(work, "audio.txt")
     with open(alist, "w") as f:
-        for i, song in enumerate(p["music"]):
+        for i, (_, src, slot) in enumerate(clips):
             wav = os.path.join(norm, f"{i:04d}.wav")
-            slot = round(float(song["end"]) - float(song["start"]), 3)
-            _run(["ffmpeg", "-y", "-loglevel", "error", "-i", os.path.abspath(song["file"]),
+            _run(["ffmpeg", "-y", "-loglevel", "error", "-i", os.path.abspath(src),
                   "-vn", "-af", "apad", "-t", str(slot),
                   "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le", wav])
             f.write(f"file '{wav}'\n")

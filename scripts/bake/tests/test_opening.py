@@ -47,9 +47,9 @@ def baked_opening(tmp_path, monkeypatch, request):
         "fps": 10, "resolution": "640x360",
         "edl": [
             {"kind": "piece", "src": "unused-piece.mp4", "in": 0, "out": 5},
-            {"kind": "ident", "src": str(source), "in": 0.4, "out": 0.2},
-            {"kind": "ident", "src": "unused-later-ident.mp4", "in": 0, "out": 1},
+            {"kind": "ident", "src": "unused-interior-ident.mp4", "in": 0, "out": 1},
         ],
+        "opening_ident": {"src": str(source), "dur": 1.2},
     }))
     manifest_path = opening._build_opening(
         plan_path, tmp_path / "show-2026-09-25.mkv", countdown_seconds=3)
@@ -81,8 +81,8 @@ def test_opening_is_silent_until_complete_ident(baked_opening):
         samples = _audio(paths[name])
         assert max(abs(sample) for sample in samples) == 0
 
-    # The EDL only uses the green middle of this ident. Its opening must retain
-    # both the red beginning and the blue ending from the entire source.
+    # The opening plays the whole planned ident source: both the red beginning
+    # and the blue ending.
     first = _frame(paths["ident"], 0.1)
     last = _frame(paths["ident"], 1.1)
     assert sum(first[0::3]) / len(first[0::3]) > 240

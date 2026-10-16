@@ -75,30 +75,71 @@ def ffprobe_duration(path: str) -> float:
     return float(out.stdout.strip())
 
 
+def ffprobe_has_audio(path: str) -> bool:
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
+         "-of", "csv=p=0", path],
+        capture_output=True, text=True, check=True)
+    return bool(out.stdout.strip())
+
+
 def build_edl(pieces, idents, boundaries, show_dur, dwell, straddle, rng) -> list[dict]:
     """rng picks each piece segment's in-point, so a piece that recurs through the
-    show doesn't always open on the same frames. Idents always play from 0."""
+    show doesn't always open on the same frames, and draws each transition's ident
+    by catalog weight. Idents always play from 0.
+
+    `boundaries` and `show_dur` are music-only times. A silent ident straddles its
+    song boundary with music underneath; an ident with audio is a break that
+    sits between the two songs and delays the rest of the show by its duration.
+    The returned EDL is in show time (breaks included)."""
     edl = []
     t = 0.0
-    pi = ii = 0
-    while t < show_dur - 1e-6:
+    pi = 0
+    shift = 0.0                     # total break time inserted so far
+    weights = [float(i.get("weight", 1.0)) for i in idents]
+    while t < show_dur + shift - 1e-6:
         piece = pieces[pi % len(pieces)]; pi += 1
-        cut_at = next((b for b in boundaries if b >= t + dwell), None)
-        if cut_at is None or cut_at >= show_dur:
-            edl.append(_piece_seg(piece, show_dur - t, t, rng))
+        cut_at = next((b + shift for b in boundaries if b + shift >= t + dwell), None)
+        if cut_at is None or cut_at >= show_dur + shift:
+            edl.append(_piece_seg(piece, show_dur + shift - t, t, rng))
             break
-        ident = idents[ii % len(idents)]; ii += 1
-        if straddle:
+        ident = rng.choices(idents, weights=weights)[0]
+        if ident.get("audio"):
+            istart, iend = cut_at, cut_at + ident["dur"]
+            shift += ident["dur"]
+        elif straddle:
             istart, iend = cut_at - ident["dur"] / 2, cut_at + ident["dur"] / 2
         else:
             istart, iend = cut_at, cut_at + ident["dur"]
         istart = max(istart, t)
         edl.append(_piece_seg(piece, istart - t, t, rng))
-        edl.append({"kind": "ident", "src": ident["src"], "in": 0.0,
-                    "out": round(min(ident["dur"], show_dur - istart), 3),
-                    "tl_start": round(istart, 3)})
+        seg = {"kind": "ident", "src": ident["src"], "in": 0.0,
+               "out": round(min(ident["dur"], show_dur + shift - istart), 3),
+               "tl_start": round(istart, 3)}
+        if ident.get("audio"):
+            seg["audio"] = True
+        edl.append(seg)
         t = iend
     return edl
+
+
+def apply_breaks(timeline: list[dict], edl: list[dict]) -> list[dict]:
+    """Shift each song past the audio-ident breaks the EDL placed before it."""
+    breaks = [(s["tl_start"], s["out"]) for s in edl if s.get("audio")]
+    out, shift, bi = [], 0.0, 0
+    for song in timeline:
+        while bi < len(breaks) and breaks[bi][0] <= song["start"] + shift + 0.01:
+            shift += breaks[bi][1]; bi += 1
+        out.append({**song, "start": round(song["start"] + shift, 3),
+                    "end": round(song["end"] + shift, 3)})
+    return out
+
+
+def pick_opening_ident(idents: list[dict], rng) -> dict:
+    """Idents flagged `opening` in the catalog open the broadcast; with none
+    flagged, any ident may. Drawn by weight among the eligible."""
+    eligible = [i for i in idents if i.get("opening")] or idents
+    return rng.choices(eligible, weights=[float(i.get("weight", 1.0)) for i in eligible])[0]
 
 
 def _piece_seg(piece, length, tl_start, rng) -> dict:
@@ -138,16 +179,20 @@ def build_plan(catalog: dict, library: list[dict], config: dict) -> dict:
 
     # Music: endless seeded shuffle, timeline built to >= show_dur.
     timeline = build_music_timeline(playlist(library, seed), target_dur=show_dur)
-    real_dur = timeline[-1]["end"] if timeline else 0.0   # exact end of the audio
+    music_dur = timeline[-1]["end"] if timeline else 0.0   # exact end of the audio
     boundaries = song_boundaries(timeline)
-    subs = build_subtitles(timeline)
 
     pieces = shuffle([{"src": p["file"], "dur": float(p["dur"])} for p in catalog["pieces"]],
                      seed=seed + 1, no_repeat=True)
-    idents = shuffle([{"src": i["file"], "dur": float(i["dur"])} for i in catalog["idents"]],
-                     seed=seed + 2)
-    edl = build_edl(pieces, idents, boundaries, real_dur, dwell, straddle,
+    idents = [{"src": i["file"], "dur": float(i["dur"]), "weight": float(i.get("weight", 1.0)),
+               "audio": bool(i.get("audio")), "opening": bool(i.get("opening"))}
+              for i in catalog["idents"]]
+    edl = build_edl(pieces, idents, boundaries, music_dur, dwell, straddle,
                     rng=random.Random(f"edl:{seed}"))
+    # Audio-ident breaks push later songs back; the show runs long by their total.
+    timeline = apply_breaks(timeline, edl)
+    real_dur = timeline[-1]["end"] if timeline else 0.0
+    opening_ident = pick_opening_ident(idents, random.Random(f"opening:{seed}"))
 
     return {
         "seed": seed,
@@ -156,7 +201,8 @@ def build_plan(catalog: dict, library: list[dict], config: dict) -> dict:
         "show_dur_sec": round(real_dur, 3),
         "music": timeline,
         "edl": edl,
-        "subtitles": subs,
+        "opening_ident": {"src": opening_ident["src"], "dur": opening_ident["dur"]},
+        "subtitles": build_subtitles(timeline),
         "excluded_songs": excluded,
         "catalog_sha": _sha(sorted(p["file"] for p in catalog["pieces"]) +
                             sorted(i["file"] for i in catalog["idents"])),
@@ -173,6 +219,8 @@ def resolve_media(entry_file: str, catalog_dir: str) -> str:
 
 
 def _load_catalog(path: str) -> dict:
+    """Idents may carry `weight` (relative draw odds, default 1) and `opening`
+    (eligible to open the broadcast). Whether an ident has audio is probed."""
     with open(path) as f:
         data = json.load(f)
     here = os.path.dirname(os.path.abspath(path))
@@ -182,7 +230,14 @@ def _load_catalog(path: str) -> dict:
         if key is None:
             continue
         f_path = resolve_media(e["file"], here)
-        out[key].append({"file": f_path, "dur": ffprobe_duration(f_path)})
+        item = {"file": f_path, "dur": ffprobe_duration(f_path)}
+        if key == "idents":
+            weight = float(e.get("weight", 1.0))
+            if weight <= 0:
+                raise ValueError(f"ident {e['file']}: weight must be > 0, got {weight}")
+            item.update(weight=weight, opening=bool(e.get("opening", False)),
+                        audio=ffprobe_has_audio(f_path))
+        out[key].append(item)
     return out
 
 

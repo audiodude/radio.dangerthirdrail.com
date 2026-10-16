@@ -123,6 +123,18 @@ gets a sidecar JSON, and
 Renders are serialized (one GPU, no contention), idempotent (existing mp4s are
 skipped; writes are atomic), and ~3× realtime under xvfb on a 3080 Ti.
 
+Idents can also be hand-made: drop the mp4 in the catalog dir with a sidecar
+(`model` can be anything, e.g. `handmade`). Two optional ident sidecar fields
+steer the nightly bake:
+
+- `weight` — relative odds of being drawn at each transition (default 1).
+- `opening: true` — eligible to open the broadcast. Only flagged idents open
+  it; with none flagged, any ident may.
+
+A silent ident straddles its song boundary with the music underneath. An ident
+**with audio** plays as a break between the two songs: the music pauses for it
+and the rest of the show shifts later by its length.
+
 ## Video playout (scripts/playout/)
 
 Mirrors the music architecture: `video_player.py` decodes catalog pieces to raw frames
