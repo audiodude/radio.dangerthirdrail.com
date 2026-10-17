@@ -1,8 +1,33 @@
-# scripts/library — Music Library Cleanup Tool
+# scripts/library — Music Library Tools
+
+## Sync from songs.travisbriggs.com
+
+The station's S3 library mirrors the songs site. Its public catalog
+(`https://songs.travisbriggs.com/songs.json`, every visible song) is the source
+of truth. After adding or removing songs on the site and deploying it:
+
+```bash
+python3 scripts/library/sync_site.py           # dry run: lists + uploads and - removals
+python3 scripts/library/sync_site.py --apply   # change S3
+```
+
+- **Uploads** songs on the site that are missing from S3, unless they're in the
+  bake denylist (`scripts/bake/song_denylist.txt`, e.g. covers). Mastered-in
+  silence is trimmed first (same thresholds as `audit.py`/`trim.py`).
+- **Removes** S3 mp3s that are no longer on the site. The bucket is not
+  versioned, so removal is permanent.
+- Denylisted songs already in S3 are left there; the bake skips them.
+- Replacing the audio of an existing song (same slug) is not detected.
+
+Needs `S3_MUSIC_BUCKET` and AWS credentials (the box's, as in the
+[runbook](../../docs/go-live-runbook.md)). The nightly bake mirrors S3 to the
+box with `--delete`, so changes reach the next show automatically.
+
+## Silence cleanup
 
 Audits and trims mastered-in silence from the station's S3 music library.
 
-## Stages
+### Stages
 
 | # | Script | What it does |
 |---|--------|--------------|

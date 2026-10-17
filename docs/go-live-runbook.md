@@ -38,6 +38,12 @@ even when they are in the S3 library (covers kept off air, plus the current
 over-length tracks). Edit it on `main`, merge to `release`, and `git pull` in
 `/opt/radio` on the box; the next bake picks it up.
 
+### Music library
+
+The S3 music library mirrors songs.travisbriggs.com: run
+`scripts/library/sync_site.py` (dry run) then `--apply`, with the box's AWS keys
+(as above) plus `S3_MUSIC_BUCKET`. See `scripts/library/README.md`.
+
 ## Bake by hand (normally the timer does this)
 
     ssh radio-playout 'sudo systemctl start radio-bake.service'   # ~2.5 h for a 6 h show

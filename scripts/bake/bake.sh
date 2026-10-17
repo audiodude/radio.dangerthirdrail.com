@@ -12,7 +12,8 @@ CATALOG_DIR="${CATALOG_DIR:-/data/catalog}"
 mkdir -p "$SHOWS_DIR" "$MUSIC_DIR" "$CATALOG_DIR"
 
 echo "[bake] syncing inputs from S3"
-aws s3 sync "${S3_MUSIC_BUCKET:?}" "$MUSIC_DIR/" --no-progress --exclude "*" --include "*.mp3"
+# --delete: a song removed from S3 must also leave the box's library.
+aws s3 sync "${S3_MUSIC_BUCKET:?}" "$MUSIC_DIR/" --no-progress --delete --exclude "*" --include "*.mp3"
 aws s3 sync "${S3_CATALOG_URI:?}" "$CATALOG_DIR/" --no-progress
 
 PLAN="$SHOWS_DIR/show-$DATE.plan.json"
