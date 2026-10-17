@@ -1,0 +1,14 @@
+# Songs the nightly bake never plans into a show, even if present in the S3
+# library. One filename per line; `#` starts a comment.
+
+# Covers (copyright)
+afternoon-delight.mp3
+decemberonefourth.mp3
+mad-world.mp3
+
+# Too long for the 300 s pieces (song cap = piece length - BAKE_DWELL)
+ashes-and-dust.mp3
+interoutter.mp3
+nz.mp3
+somewhere-else.mp3
+son-of-bna.mp3

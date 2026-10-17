@@ -28,7 +28,15 @@ a temp AVI, Lanczos-downscaled to 720p at CRF 18).
 of the current song`, so it must fit inside the **shortest** piece. Songs longer
 than `min_piece - dwell` are dropped from the show (listed as `excluded_songs`
 in the plan, and printed by the bake). With 300 s pieces and `BAKE_DWELL=30`
-that drops 3 of 165 tracks. Want the long tracks on air? Render longer pieces.
+the cap is 270 s. Want the long tracks on air? Render longer pieces, and remove
+them from the denylist below.
+
+### Song denylist
+
+`scripts/bake/song_denylist.txt` lists song filenames the bake never plans,
+even when they are in the S3 library (covers kept off air, plus the current
+over-length tracks). Edit it on `main`, merge to `release`, and `git pull` in
+`/opt/radio` on the box; the next bake picks it up.
 
 ## Bake by hand (normally the timer does this)
 

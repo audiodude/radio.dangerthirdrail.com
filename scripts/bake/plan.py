@@ -241,6 +241,15 @@ def _load_catalog(path: str) -> dict:
     return out
 
 
+DENYLIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "song_denylist.txt")
+
+
+def load_denylist(path: str) -> set[str]:
+    """Song filenames (one per line, `#` comments) never planned into a show."""
+    with open(path) as f:
+        return {line.split("#", 1)[0].strip() for line in f} - {""}
+
+
 def main():
     import argparse
     ap = argparse.ArgumentParser()
@@ -252,13 +261,20 @@ def main():
     ap.add_argument("--fps", type=int, default=60)
     ap.add_argument("--resolution", default="1280x720")
     ap.add_argument("--straddle", action="store_true", default=True)
+    ap.add_argument("--denylist", default=DENYLIST)
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
     import glob
     catalog = _load_catalog(a.catalog)
+    denied = load_denylist(a.denylist)
+    paths = sorted(glob.glob(os.path.join(a.library_dir, "*.mp3")))
+    skipped = [p for p in paths if os.path.basename(p) in denied]
     library = [{"file": p, "title": title_from_path(p), "dur": ffprobe_duration(p)}
-               for p in sorted(glob.glob(os.path.join(a.library_dir, "*.mp3")))]
+               for p in paths if os.path.basename(p) not in denied]
+    if skipped:
+        print(f"[plan] denylisted {len(skipped)} song(s): "
+              f"{', '.join(os.path.basename(p) for p in skipped)}")
     cfg = {"seed": a.seed, "show_dur_sec": a.show_dur, "dwell_sec": a.dwell,
            "fps": a.fps, "resolution": a.resolution, "straddle": a.straddle}
     plan_doc = build_plan(catalog, library, cfg)
