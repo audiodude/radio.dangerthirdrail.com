@@ -125,7 +125,7 @@ skipped; writes are atomic), and take ~6× realtime on a 3080 Ti (~29 min per 30
 piece, encode included).
 
 vxstory's `hydra` model (original Hydra sketches; presets `cells`, `weave`, `glass`,
-`marble`, `chrome`, `fold`) renders through its own `hydra/render.mjs` (headless GPU
+`chrome`, `fold`) renders through its own `hydra/render.mjs` (headless GPU
 Chromium, no xvfb) instead of Godot. `render_piece.sh` picks it whenever the model dir
 has a `render.mjs`; the 720p encode, sidecar and manifest steps are unchanged. One-time
 setup in the vxstory checkout (Node ≥ 24):
