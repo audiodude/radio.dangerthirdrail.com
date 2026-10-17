@@ -121,7 +121,15 @@ gets a sidecar JSON, and
 `make_manifest.py` collects sidecars into `catalog.json`:
 `{"pieces": [{id, kind: piece|ident, model, preset, seed, duration_sec, file, rendered_at}]}`.
 Renders are serialized (one GPU, no contention), idempotent (existing mp4s are
-skipped; writes are atomic), and ~3× realtime under xvfb on a 3080 Ti.
+skipped; writes are atomic), and take ~6× realtime on a 3080 Ti (~29 min per 300 s
+piece, encode included).
+
+vxstory's `hydra` model (original Hydra sketches; presets `cells`, `weave`, `glass`,
+`marble`, `chrome`, `fold`) renders through its own `hydra/render.mjs` (headless GPU
+Chromium, no xvfb) instead of Godot. `render_piece.sh` picks it whenever the model dir
+has a `render.mjs`; the 720p encode, sidecar and manifest steps are unchanged. One-time
+setup in the vxstory checkout (Node ≥ 24):
+`cd hydra && npm ci && npx playwright install chromium-headless-shell`.
 
 Idents can also be hand-made: drop the mp4 in the catalog dir with a sidecar
 (`model` can be anything, e.g. `handmade`). Two optional ident sidecar fields

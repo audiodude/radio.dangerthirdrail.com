@@ -59,14 +59,19 @@ jq --argjson seed "$SEED" '.seed = $seed' "$PRESET_PATH" > "$TMP_PRESET"
 echo "[render_piece] rendering $MODEL/$PRESET seed=$SEED duration=${DURATION}s -> $OUT_MP4"
 START_TIME="$(date +%s)"
 
-xvfb-run -a -s "-screen 0 1920x1080x24" \
-    godot --path "$MODEL_DIR" \
-    --write-movie "$TMP_AVI" \
-    --fixed-fps 60 \
-    -- --preset "$TMP_PRESET" --duration "$DURATION"
+if [[ -f "$MODEL_DIR/render.mjs" ]]; then
+    # hydra: headless GPU Chromium, no display; writes the same MJPEG AVI intermediate.
+    node "$MODEL_DIR/render.mjs" --preset "$TMP_PRESET" --duration "$DURATION" --out "$TMP_AVI"
+else
+    xvfb-run -a -s "-screen 0 1920x1080x24" \
+        godot --path "$MODEL_DIR" \
+        --write-movie "$TMP_AVI" \
+        --fixed-fps 60 \
+        -- --preset "$TMP_PRESET" --duration "$DURATION"
+fi
 
 ELAPSED=$(( $(date +%s) - START_TIME ))
-echo "[render_piece] godot done in ${ELAPSED}s, encoding mp4..."
+echo "[render_piece] render done in ${ELAPSED}s, encoding mp4..."
 
 # Encode to a temp name and mv into place so a killed run can never leave a
 # half-written mp4 that the skip-if-exists check would mistake for complete.
