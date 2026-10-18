@@ -44,6 +44,15 @@ The S3 music library mirrors songs.travisbriggs.com: run
 `scripts/library/sync_site.py` (dry run) then `--apply`, with the box's AWS keys
 (as above) plus `S3_MUSIC_BUCKET`. See `scripts/library/README.md`.
 
+The sync stores every song trimmed and loudness-normalized (gain-only) to the
+on-air level, −21 LUFS / ≤ −1 dBTP, and the bake plays the files as they are
+(no gain in `assemble.py`). Songs uploaded before normalization show up as `~`
+in the dry run; `--apply` re-makes them from the site. Rolling out a level
+change (including the first one, which retired the bake's old blanket −7 dB):
+run `sync_site.py --apply` and update `/opt/radio/scripts/bake/` on the box on
+the same day, before the 03:00 PT bake; otherwise one show plays the old songs
+7 dB hot, or the new songs 7 dB quiet.
+
 ## Bake by hand (normally the timer does this)
 
     ssh radio-playout 'sudo systemctl start radio-bake.service'   # ~2.5 h for a 6 h show

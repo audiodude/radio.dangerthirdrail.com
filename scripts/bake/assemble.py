@@ -115,9 +115,14 @@ def _assemble(plan_path: str, out_path: str, work: str):
                   "-vn", "-af", "apad", "-t", str(slot),
                   "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le", wav])
             f.write(f"file '{wav}'\n")
+    # No gain here: scripts/library/sync_site.py stores every song already
+    # loudness-normalized to the on-air level (-21 LUFS, gain-only), so the
+    # show plays the files as they are. (This used to be a blanket -7 dB over
+    # unnormalized songs; audio idents now play at their own level here too,
+    # as they already did in the opening.)
     audio = os.path.join(work, "audio.m4a")
     _run(["ffmpeg", "-y", "-loglevel", "warning", "-f", "concat", "-safe", "0", "-i", alist,
-          "-af", "volume=-7dB", "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", audio])
+          "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", audio])
 
     # --- mux (stream-copy), atomic rename ---
     tmp_out = out_path + ".tmp.mkv"

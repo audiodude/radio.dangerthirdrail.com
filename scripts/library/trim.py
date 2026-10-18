@@ -85,15 +85,12 @@ def measure_silence(path: str) -> tuple[float, float]:
     return leading_s, trailing_s
 
 
-def trim_file(src: str, dst: str, record: dict) -> dict:
-    """
-    Trim src → dst.  Returns a result dict with before/after measurements.
-    """
+def trim_window(record: dict) -> tuple[float, float]:
+    """(trim_from, trim_to) in seconds for an audit record."""
     duration    = record["duration"]
     trailing_s  = record["trailing_s"]
     leading_s   = record["leading_s"]
 
-    # Compute trim window
     # Signal end: where the trailing silence begins
     signal_end   = duration - trailing_s
     trim_to      = signal_end + TAIL_KEEP_S   # where we cut the tail
@@ -103,8 +100,14 @@ def trim_file(src: str, dst: str, record: dict) -> dict:
     trim_from    = max(0.0, signal_start - LEAD_KEEP_S)
 
     # Clamp
-    trim_to = min(trim_to, duration)
+    return trim_from, min(trim_to, duration)
 
+
+def trim_file(src: str, dst: str, record: dict) -> dict:
+    """
+    Trim src → dst.  Returns a result dict with before/after measurements.
+    """
+    trim_from, trim_to = trim_window(record)
     tmp_dst = dst + ".tmp.mp3"
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error",
