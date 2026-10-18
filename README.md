@@ -212,10 +212,12 @@ see the runbook for deployment order and local-output verification.
 
 ## Legacy Galton deployment
 
-The following describes the older Galton service stack. Current pre-baked
-playout deployment is documented in the [go-live runbook](docs/go-live-runbook.md).
+The following describes the older Galton service stack, kept for history. Its Railway
+`galton-stream` service and volume were deleted on 2026-10-18; only the monitor still
+runs on Railway. Current pre-baked playout deployment is documented in the
+[go-live runbook](docs/go-live-runbook.md).
 
-Railway auto-deploys both services from the `release` branch (not `main`). Push to `main` for development, then merge to `release` to deploy.
+Railway auto-deployed both services from the `release` branch (not `main`).
 
 ### Two-service architecture
 
