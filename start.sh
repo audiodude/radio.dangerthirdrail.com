@@ -33,13 +33,11 @@ in_operational_window() {
 # Sync music from S3 if the folder is empty (do this even outside the
 # window so we're ready the moment it opens).
 mkdir -p "$MUSIC_DIR"
-if [ -z "$(ls -A $MUSIC_DIR/*.mp3 2>/dev/null)" ]; then
-    echo "Syncing music from S3..."
-    aws s3 sync "$S3_BUCKET" "$MUSIC_DIR/" --no-progress
-    echo "Music sync complete: $(ls $MUSIC_DIR/*.mp3 | wc -l) tracks"
-else
-    echo "Music already present: $(ls $MUSIC_DIR/*.mp3 | wc -l) tracks"
-fi
+# Always sync: it's incremental, and it picks up re-processed (loudness-normalized)
+# and removed songs, which a "skip if the volume cache is non-empty" check never did.
+echo "Syncing music from S3..."
+aws s3 sync "$S3_BUCKET" "$MUSIC_DIR/" --delete --no-progress
+echo "Music sync complete: $(ls $MUSIC_DIR/*.mp3 | wc -l) tracks"
 
 # Main loop: wait for the operational window, stream during it, tear down
 # at the end, then loop back to wait for the next day's window. The
@@ -133,7 +131,6 @@ while true; do
                 -ac 2 \
                 -i "$AUDIO_PIPE" \
                 -vf scale=${OUTPUT_RES} \
-                -af volume=-7dB \
                 -c:v libx264 \
                 -preset ultrafast \
                 -tune zerolatency \

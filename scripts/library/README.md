@@ -89,7 +89,7 @@ uploads lacks the `library-process` marker, and the next
 - `trim.py` writes new files into `<workdir>/trimmed/`. Non-offenders are not copied there.
 - `sync_up.sh` uploads **only** files present in `trimmed/`, touching only the changed tracks.
 - `sync_up.sh` is intentionally kept separate so a human can inspect trimmed files before any S3 write happens.
-- After upload, the Railway volume cache (`/data/mp3`) must be cleared manually before the station picks up the new files — `start.sh` skips sync when that directory is non-empty.
+- The legacy Railway player (`start.sh`) re-syncs its volume cache (`/data/mp3`) from S3 on every start (incremental, with `--delete`), so it picks up new and re-normalized files after a restart.
 
 ## Env requirements
 
