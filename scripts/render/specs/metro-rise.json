@@ -1,0 +1,4 @@
+[
+  {"model": "metro_rise", "preset": "century", "seed": 207, "duration_sec": 300, "kind": "piece"},
+  {"model": "metro_rise", "preset": "century", "seed": 307, "duration_sec": 300, "kind": "piece"}
+]

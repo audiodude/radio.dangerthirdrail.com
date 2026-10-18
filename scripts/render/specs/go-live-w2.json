@@ -1,0 +1,8 @@
+[
+  {"model": "radial_burst",     "preset": "pulsar",    "seed": 301, "duration_sec": 300, "kind": "piece"},
+  {"model": "peg_cascade",      "preset": "clockwork", "seed": 302, "duration_sec": 300, "kind": "piece"},
+  {"model": "fluid_swirl",      "preset": "aurora",    "seed": 303, "duration_sec": 300, "kind": "piece"},
+  {"model": "matter_cycle",     "preset": "tides",     "seed": 304, "duration_sec": 300, "kind": "piece"},
+  {"model": "chromatic_cascade","preset": "fresco",    "seed": 305, "duration_sec": 300, "kind": "piece"},
+  {"model": "supernova_orbit",  "preset": "odyssey",   "seed": 306, "duration_sec": 300, "kind": "piece"}
+]
