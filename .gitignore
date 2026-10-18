@@ -27,3 +27,6 @@ playout_test*.mp4
 nohup.out
 queue_blocking_report.md
 /CLAUDE.md
+
+# Local working status report (not for git)
+/STATUS.md
