@@ -148,8 +148,12 @@ and the rest of the show shifts later by its length.
 The bake spaces idents at least **two songs apart** (the opening ident counts as
 sitting before the first song) and never plays the same ident twice in a row,
 except a filler when nothing else is available.
-A stretch between idents longer than one piece hard-cuts to the next piece at a
-song boundary, with no ident.
+Each stretch between idents is drawn **uncut** (75%, `UNCUT_SHARE` in
+`scripts/bake/plan.py`) or **cut**. An uncut stretch plays one piece long
+enough to cover both songs, so 600 s pieces carry the long pairs; with none
+long enough it falls back to cut. A cut stretch hard-cuts to a new piece at the
+song boundary between the two songs. Pieces rotate least-recently-used and never
+play twice in a row.
 
 ## Video playout (scripts/playout/)
 

@@ -43,7 +43,7 @@ def test_edl_cuts_at_first_boundary_after_dwell():
     idents = [_piece("id.mp4", 12.0)]
     boundaries = [180.0, 360.0, 540.0, 720.0]   # songs every 180s
     edl = plan.build_edl(pieces, idents, boundaries, show_dur=2000.0, dwell=300.0, straddle=True,
-                         rng=random.Random(0))
+                         rng=random.Random(0), uncut_share=1.0)
     # first piece: dwell 300 -> first boundary >=300 is 360; ident straddles 360
     assert edl[0]["kind"] == "piece" and edl[0]["tl_start"] == 0.0
     assert edl[0]["out"] == 354.0                 # 360 - 12/2 - 0
@@ -78,7 +78,7 @@ def test_edl_audio_ident_is_a_break_between_songs():
               {"src": "loud2.mp4", "dur": 20.0, "weight": 1e-9, "audio": True}]
     boundaries = [180.0, 360.0, 540.0, 720.0, 900.0]
     edl = plan.build_edl(pieces, idents, boundaries, show_dur=1000.0, dwell=300.0,
-                         straddle=True, rng=random.Random(0))
+                         straddle=True, rng=random.Random(0), uncut_share=1.0)
     # cut at 360: piece runs to the boundary, ident fills [360, 380], no straddle
     assert edl[0]["out"] == 360.0
     assert edl[1] == {"kind": "ident", "src": "loud.mp4", "in": 0.0, "out": 20.0,
@@ -99,8 +99,45 @@ def test_edl_silent_ident_still_straddles_alongside_audio_idents():
     idents = [{"src": "quiet.mp4", "dur": 12.0, "weight": 1.0},
               {"src": "loud.mp4", "dur": 20.0, "weight": 1e-9, "audio": True}]
     edl = plan.build_edl(pieces, idents, [180.0, 360.0, 540.0], show_dur=600.0, dwell=300.0,
-                         straddle=True, rng=random.Random(0))
+                         straddle=True, rng=random.Random(0), uncut_share=1.0)
     assert edl[1]["src"] == "quiet.mp4" and edl[1]["tl_start"] == 354.0 and "audio" not in edl[1]
+
+def test_stretches_mix_uncut_long_pieces_and_cuts_at_song_boundaries():
+    # songs alternate 150/250 s, so a two-song stretch (~400 s) outruns the 300s
+    # pieces: an uncut stretch has to take a 600 s piece
+    pieces = [_piece(f"s{i}.mp4", 300.0) for i in range(4)] + \
+             [_piece(f"L{i}.mp4", 600.0) for i in range(2)]
+    boundaries, b = [], 0.0
+    for i in range(400):
+        b += 150.0 if i % 2 else 250.0
+        boundaries.append(b)
+    edl = plan.build_edl(pieces, [_piece("a.mp4", 12.0), _piece("b.mp4", 12.0)], boundaries,
+                         show_dur=boundaries[-1], dwell=30.0, straddle=True,
+                         rng=random.Random(3))
+    runs, cur = [], []
+    for seg in edl:
+        if seg["kind"] == "ident":
+            runs.append(cur); cur = []
+        else:
+            cur.append(seg)
+    runs = runs[1:]                                   # first stretch follows the opening
+    uncut = [r for r in runs if len(r) == 1]
+    assert all(r[0]["src"].startswith("L") for r in uncut)
+    assert all(len(r) == 2 and r[1]["tl_start"] in boundaries for r in runs if len(r) != 1)
+    assert 0.70 < len(uncut) / len(runs) < 0.80
+    srcs = [s["src"] for s in edl if s["kind"] == "piece"]
+    assert all(x != y for x, y in zip(srcs, srcs[1:]))
+    for seg in edl:
+        if seg["kind"] == "piece":
+            assert seg["in"] + seg["out"] <= (600.0 if seg["src"].startswith("L") else 300.0) + 1e-6
+
+def test_uncut_stretch_falls_back_to_cut_when_no_piece_is_long_enough():
+    pieces = [_piece("p0.mp4", 300.0), _piece("p1.mp4", 300.0)]
+    edl = plan.build_edl(pieces, [_piece("a.mp4", 12.0), _piece("b.mp4", 12.0)],
+                         [i * 250.0 for i in range(1, 40)], show_dur=9750.0, dwell=30.0,
+                         straddle=True, rng=random.Random(0), uncut_share=1.0)
+    kinds = [s["kind"] for s in edl]
+    assert "piece" in [b for a, b in zip(kinds, kinds[1:]) if a == "piece"]   # cuts happened
 
 def test_ident_weights_set_draw_odds():
     # the previous ident is excluded, so after "b" the draw is a:c at 3:1
