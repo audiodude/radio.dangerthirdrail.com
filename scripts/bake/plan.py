@@ -83,36 +83,66 @@ def ffprobe_has_audio(path: str) -> bool:
     return bool(out.stdout.strip())
 
 
-def build_edl(pieces, idents, boundaries, show_dur, dwell, straddle, rng) -> list[dict]:
+def build_edl(pieces, idents, boundaries, show_dur, dwell, straddle, rng,
+              prev_ident=None) -> list[dict]:
     """rng picks each piece segment's in-point, so a piece that recurs through the
     show doesn't always open on the same frames, and draws each transition's ident
     by catalog weight. Idents always play from 0.
+
+    Idents are spaced at least two songs apart (the opening ident, `prev_ident`,
+    counts as one sitting before the first song), and never repeat the previous
+    ident. A transition with no other ident to draw becomes a straight cut.
+    A stretch between idents longer than the next piece hard-cuts to another
+    piece at the latest song boundary that piece can reach.
 
     `boundaries` and `show_dur` are music-only times. A silent ident straddles its
     song boundary with music underneath; an ident with audio is a break that
     sits between the two songs and delays the rest of the show by its duration.
     The returned EDL is in show time (breaks included)."""
     edl = []
-    t = 0.0
     pi = 0
+
+    def fill(t, end):
+        """Cover show time [t, end) with piece segments, cutting at song boundaries."""
+        nonlocal pi
+        while True:
+            piece = pieces[pi % len(pieces)]; pi += 1
+            if end - t <= piece["dur"] + 1e-6:
+                edl.append(_piece_seg(piece, end - t, t, rng))
+                return
+            split = max((b + shift for b in boundaries
+                         if t + 1e-6 < b + shift <= t + piece["dur"]),
+                        default=t + piece["dur"])   # no boundary in reach: cut mid-song
+            edl.append(_piece_seg(piece, split - t, t, rng))
+            t = split
+
+    t = 0.0
     shift = 0.0                     # total break time inserted so far
-    weights = [float(i.get("weight", 1.0)) for i in idents]
+    last_k = -1                     # boundary index of the last ident; -1 = opening
     while t < show_dur + shift - 1e-6:
-        piece = pieces[pi % len(pieces)]; pi += 1
-        cut_at = next((b + shift for b in boundaries if b + shift >= t + dwell), None)
+        k = next((k for k, b in enumerate(boundaries)
+                  if k >= last_k + 2 and b + shift >= t + dwell), None)
+        cut_at = None if k is None else boundaries[k] + shift
         if cut_at is None or cut_at >= show_dur + shift:
-            edl.append(_piece_seg(piece, show_dur + shift - t, t, rng))
+            fill(t, show_dur + shift)
             break
-        ident = rng.choices(idents, weights=weights)[0]
+        eligible = [i for i in idents if i["src"] != prev_ident]
+        if not eligible:
+            fill(t, cut_at)
+            t, last_k = cut_at, k
+            continue
+        ident = rng.choices(eligible, weights=[float(i.get("weight", 1.0)) for i in eligible])[0]
+        prev_ident, last_k = ident["src"], k
         if ident.get("audio"):
             istart, iend = cut_at, cut_at + ident["dur"]
-            shift += ident["dur"]
         elif straddle:
             istart, iend = cut_at - ident["dur"] / 2, cut_at + ident["dur"] / 2
         else:
             istart, iend = cut_at, cut_at + ident["dur"]
         istart = max(istart, t)
-        edl.append(_piece_seg(piece, istart - t, t, rng))
+        fill(t, istart)
+        if ident.get("audio"):
+            shift += ident["dur"]
         seg = {"kind": "ident", "src": ident["src"], "in": 0.0,
                "out": round(min(ident["dur"], show_dur + shift - istart), 3),
                "tl_start": round(istart, 3)}
@@ -164,7 +194,8 @@ def build_plan(catalog: dict, library: list[dict], config: dict) -> dict:
     straddle = bool(config.get("straddle", True))
 
     # DWELL constraint: a piece segment runs dwell + the rest of the current song,
-    # so it must fit within the shortest piece source. Songs too long to satisfy
+    # so it must fit within the shortest piece source. (Longer stretches between
+    # idents hard-cut piece to piece at song boundaries.) Songs too long to satisfy
     # that are dropped from the show rather than failing the bake — the catalog's
     # piece length is the hard limit, and one 9-minute track shouldn't block a
     # night's stream. (Lift the cap by rendering longer pieces.)
@@ -187,12 +218,12 @@ def build_plan(catalog: dict, library: list[dict], config: dict) -> dict:
     idents = [{"src": i["file"], "dur": float(i["dur"]), "weight": float(i.get("weight", 1.0)),
                "audio": bool(i.get("audio")), "opening": bool(i.get("opening"))}
               for i in catalog["idents"]]
+    opening_ident = pick_opening_ident(idents, random.Random(f"opening:{seed}"))
     edl = build_edl(pieces, idents, boundaries, music_dur, dwell, straddle,
-                    rng=random.Random(f"edl:{seed}"))
+                    rng=random.Random(f"edl:{seed}"), prev_ident=opening_ident["src"])
     # Audio-ident breaks push later songs back; the show runs long by their total.
     timeline = apply_breaks(timeline, edl)
     real_dur = timeline[-1]["end"] if timeline else 0.0
-    opening_ident = pick_opening_ident(idents, random.Random(f"opening:{seed}"))
 
     return {
         "seed": seed,

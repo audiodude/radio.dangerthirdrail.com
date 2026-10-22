@@ -74,7 +74,8 @@ def test_edl_covers_full_show():
 
 def test_edl_audio_ident_is_a_break_between_songs():
     pieces = [_piece(f"p{i}.mp4", 1200.0) for i in range(3)]
-    idents = [{"src": "loud.mp4", "dur": 20.0, "audio": True}]
+    idents = [{"src": "loud.mp4", "dur": 20.0, "audio": True},
+              {"src": "loud2.mp4", "dur": 20.0, "weight": 1e-9, "audio": True}]
     boundaries = [180.0, 360.0, 540.0, 720.0, 900.0]
     edl = plan.build_edl(pieces, idents, boundaries, show_dur=1000.0, dwell=300.0,
                          straddle=True, rng=random.Random(0))
@@ -102,14 +103,55 @@ def test_edl_silent_ident_still_straddles_alongside_audio_idents():
     assert edl[1]["src"] == "quiet.mp4" and edl[1]["tl_start"] == 354.0 and "audio" not in edl[1]
 
 def test_ident_weights_set_draw_odds():
+    # the previous ident is excluded, so after "b" the draw is a:c at 3:1
     pieces = [_piece("p0.mp4", 1200.0), _piece("p1.mp4", 1200.0)]
-    idents = [{"src": "test.mp4", "dur": 12.0, "weight": 3.0},
-              {"src": "real.mp4", "dur": 12.0, "weight": 1.0}]
-    edl = plan.build_edl(pieces, idents, [i * 100.0 for i in range(1, 4001)], show_dur=400000.0,
+    idents = [{"src": "a.mp4", "dur": 12.0, "weight": 3.0},
+              {"src": "b.mp4", "dur": 12.0, "weight": 1.0},
+              {"src": "c.mp4", "dur": 12.0, "weight": 1.0}]
+    edl = plan.build_edl(pieces, idents, [i * 100.0 for i in range(1, 8001)], show_dur=800000.0,
                          dwell=50.0, straddle=True, rng=random.Random(5))
     picks = [s["src"] for s in edl if s["kind"] == "ident"]
-    share = picks.count("real.mp4") / len(picks)
-    assert len(picks) > 3000 and 0.22 < share < 0.28
+    after_b = [nxt for prev, nxt in zip(picks, picks[1:]) if prev == "b.mp4"]
+    share = after_b.count("a.mp4") / len(after_b)
+    assert len(after_b) > 500 and 0.70 < share < 0.80
+
+def test_idents_two_songs_apart_and_never_repeat():
+    pieces = [_piece("p0.mp4", 1200.0), _piece("p1.mp4", 1200.0)]
+    idents = [{"src": "a.mp4", "dur": 12.0, "weight": 1000.0},
+              {"src": "b.mp4", "dur": 12.0, "weight": 1.0}]
+    boundaries = [i * 100.0 for i in range(1, 200)]
+    edl = plan.build_edl(pieces, idents, boundaries, show_dur=20000.0, dwell=0.0,
+                         straddle=True, rng=random.Random(1), prev_ident="a.mp4")
+    cuts = [round(s["tl_start"] + 6.0) for s in edl if s["kind"] == "ident"]
+    srcs = [s["src"] for s in edl if s["kind"] == "ident"]
+    # opening ident sits before song 1, so the first may follow song 2 at the earliest
+    assert cuts[0] == 200 and all(b - a == 200 for a, b in zip(cuts, cuts[1:]))
+    assert srcs[0] == "b.mp4" and all(x != y for x, y in zip(srcs, srcs[1:]))
+
+def test_lone_ident_never_repeats_transitions_become_cuts():
+    pieces = [_piece("p0.mp4", 1200.0), _piece("p1.mp4", 1200.0)]
+    edl = plan.build_edl(pieces, [_piece("id.mp4", 12.0)], [i * 100.0 for i in range(1, 30)],
+                         show_dur=3000.0, dwell=0.0, straddle=True, rng=random.Random(0))
+    assert [s["kind"] for s in edl].count("ident") == 1
+    last = edl[-1]
+    assert abs(last["tl_start"] + last["out"] - 3000.0) < 0.05
+
+def test_long_stretch_between_idents_hard_cuts_at_song_boundaries():
+    # 250 s songs, 300 s pieces: two songs between idents can't fit one piece
+    pieces = [_piece(f"p{i}.mp4", 300.0) for i in range(3)]
+    idents = [_piece("a.mp4", 12.0), _piece("b.mp4", 12.0)]
+    boundaries = [i * 250.0 for i in range(1, 40)]
+    edl = plan.build_edl(pieces, idents, boundaries, show_dur=10000.0, dwell=30.0,
+                         straddle=True, rng=random.Random(2), prev_ident="a.mp4")
+    for prev, seg in zip(edl, edl[1:]):
+        assert abs(prev["tl_start"] + prev["out"] - seg["tl_start"]) < 0.01   # gapless
+        if prev["kind"] == seg["kind"] == "piece":                          # hard cut
+            assert seg["tl_start"] % 250.0 == 0.0 and seg["src"] != prev["src"]
+    for seg in edl:
+        if seg["kind"] == "piece":
+            assert seg["in"] + seg["out"] <= 300.0 + 1e-6
+    cuts = [s["tl_start"] + 6.0 for s in edl if s["kind"] == "ident"]
+    assert cuts[0] == 500.0 and all(b - a >= 500.0 for a, b in zip(cuts, cuts[1:]))
 
 def test_opening_ident_is_drawn_from_flagged_idents_only():
     idents = [{"src": "test.mp4", "dur": 12.0, "weight": 1000.0},

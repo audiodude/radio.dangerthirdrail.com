@@ -143,6 +143,11 @@ A silent ident straddles its song boundary with the music underneath. An ident
 **with audio** plays as a break between the two songs: the music pauses for it
 and the rest of the show shifts later by its length.
 
+The bake spaces idents at least **two songs apart** (the opening ident counts as
+sitting before the first song) and never plays the same ident twice in a row.
+A stretch between idents longer than one piece hard-cuts to the next piece at a
+song boundary, with no ident.
+
 ## Video playout (scripts/playout/)
 
 Mirrors the music architecture: `video_player.py` decodes catalog pieces to raw frames
