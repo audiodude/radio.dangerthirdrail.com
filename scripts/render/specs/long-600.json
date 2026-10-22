@@ -1,0 +1,6 @@
+[
+  {"model": "fluid_swirl",     "preset": "lava_lamp",   "seed": 501, "duration_sec": 600, "kind": "piece"},
+  {"model": "metro_rise",      "preset": "boomtown",    "seed": 502, "duration_sec": 600, "kind": "piece"},
+  {"model": "peg_cascade",     "preset": "zen_garden",  "seed": 503, "duration_sec": 600, "kind": "piece"},
+  {"model": "supernova_orbit", "preset": "slow_burn",   "seed": 504, "duration_sec": 600, "kind": "piece"}
+]
