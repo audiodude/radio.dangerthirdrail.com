@@ -132,19 +132,22 @@ setup in the vxstory checkout (Node ≥ 24):
 `cd hydra && npm ci && npx playwright install chromium-headless-shell`.
 
 Idents can also be hand-made: drop the mp4 in the catalog dir with a sidecar
-(`model` can be anything, e.g. `handmade`). Two optional ident sidecar fields
+(`model` can be anything, e.g. `handmade`). Three optional ident sidecar fields
 steer the nightly bake:
 
 - `weight` — relative odds of being drawn at each transition (default 1).
 - `opening: true` — eligible to open the broadcast. Only flagged idents open
   it; with none flagged, any ident may.
+- `filler: true` — plays when no other ident is available, even right after
+  itself (the test ident `text_ident_plz_ignore_s1` is the filler).
 
 A silent ident straddles its song boundary with the music underneath. An ident
 **with audio** plays as a break between the two songs: the music pauses for it
 and the rest of the show shifts later by its length.
 
 The bake spaces idents at least **two songs apart** (the opening ident counts as
-sitting before the first song) and never plays the same ident twice in a row.
+sitting before the first song) and never plays the same ident twice in a row,
+except a filler when nothing else is available.
 A stretch between idents longer than one piece hard-cuts to the next piece at a
 song boundary, with no ident.
 

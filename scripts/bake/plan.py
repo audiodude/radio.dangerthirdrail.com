@@ -91,7 +91,8 @@ def build_edl(pieces, idents, boundaries, show_dur, dwell, straddle, rng,
 
     Idents are spaced at least two songs apart (the opening ident, `prev_ident`,
     counts as one sitting before the first song), and never repeat the previous
-    ident. A transition with no other ident to draw becomes a straight cut.
+    ident. When no other ident is available, a `filler` ident plays even if it
+    repeats; with no filler either, the transition becomes a straight cut.
     A stretch between idents longer than the next piece hard-cuts to another
     piece at the latest song boundary that piece can reach.
 
@@ -126,7 +127,8 @@ def build_edl(pieces, idents, boundaries, show_dur, dwell, straddle, rng,
         if cut_at is None or cut_at >= show_dur + shift:
             fill(t, show_dur + shift)
             break
-        eligible = [i for i in idents if i["src"] != prev_ident]
+        eligible = ([i for i in idents if i["src"] != prev_ident]
+                    or [i for i in idents if i.get("filler")])
         if not eligible:
             fill(t, cut_at)
             t, last_k = cut_at, k
@@ -216,7 +218,8 @@ def build_plan(catalog: dict, library: list[dict], config: dict) -> dict:
     pieces = shuffle([{"src": p["file"], "dur": float(p["dur"])} for p in catalog["pieces"]],
                      seed=seed + 1, no_repeat=True)
     idents = [{"src": i["file"], "dur": float(i["dur"]), "weight": float(i.get("weight", 1.0)),
-               "audio": bool(i.get("audio")), "opening": bool(i.get("opening"))}
+               "audio": bool(i.get("audio")), "opening": bool(i.get("opening")),
+               "filler": bool(i.get("filler"))}
               for i in catalog["idents"]]
     opening_ident = pick_opening_ident(idents, random.Random(f"opening:{seed}"))
     edl = build_edl(pieces, idents, boundaries, music_dur, dwell, straddle,
@@ -250,8 +253,9 @@ def resolve_media(entry_file: str, catalog_dir: str) -> str:
 
 
 def _load_catalog(path: str) -> dict:
-    """Idents may carry `weight` (relative draw odds, default 1) and `opening`
-    (eligible to open the broadcast). Whether an ident has audio is probed."""
+    """Idents may carry `weight` (relative draw odds, default 1), `opening`
+    (eligible to open the broadcast) and `filler` (plays when no other ident is
+    available, even back to back). Whether an ident has audio is probed."""
     with open(path) as f:
         data = json.load(f)
     here = os.path.dirname(os.path.abspath(path))
@@ -267,7 +271,7 @@ def _load_catalog(path: str) -> dict:
             if weight <= 0:
                 raise ValueError(f"ident {e['file']}: weight must be > 0, got {weight}")
             item.update(weight=weight, opening=bool(e.get("opening", False)),
-                        audio=ffprobe_has_audio(f_path))
+                        filler=bool(e.get("filler", False)), audio=ffprobe_has_audio(f_path))
         out[key].append(item)
     return out
 

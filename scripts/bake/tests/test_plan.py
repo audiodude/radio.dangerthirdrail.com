@@ -136,6 +136,21 @@ def test_lone_ident_never_repeats_transitions_become_cuts():
     last = edl[-1]
     assert abs(last["tl_start"] + last["out"] - 3000.0) < 0.05
 
+def test_filler_plays_when_no_other_ident_is_available():
+    pieces = [_piece("p0.mp4", 1200.0), _piece("p1.mp4", 1200.0)]
+    idents = [{"src": "real.mp4", "dur": 12.0},
+              {"src": "fill.mp4", "dur": 12.0, "weight": 1e-9, "filler": True}]
+    edl = plan.build_edl(pieces, idents, [i * 100.0 for i in range(1, 30)], show_dur=3000.0,
+                         dwell=0.0, straddle=True, rng=random.Random(0), prev_ident="real.mp4")
+    srcs = [s["src"] for s in edl if s["kind"] == "ident"]
+    # real can't follow the opening real; fill can't follow itself unless nothing else is left
+    assert srcs[:3] == ["fill.mp4", "real.mp4", "fill.mp4"]
+    assert all(a != b for a, b in zip(srcs, srcs[1:]))
+    lone = plan.build_edl(pieces, [{"src": "fill.mp4", "dur": 12.0, "filler": True}],
+                          [i * 100.0 for i in range(1, 30)], show_dur=3000.0, dwell=0.0,
+                          straddle=True, rng=random.Random(0))
+    assert [s["kind"] for s in lone].count("ident") == 14   # every 2nd boundary, repeating
+
 def test_long_stretch_between_idents_hard_cuts_at_song_boundaries():
     # 250 s songs, 300 s pieces: two songs between idents can't fit one piece
     pieces = [_piece(f"p{i}.mp4", 300.0) for i in range(3)]
