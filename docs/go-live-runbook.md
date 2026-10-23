@@ -75,6 +75,8 @@ begins only after it finishes.
 
 `playout.sh` launches `playout.py`. One FFmpeg connection stream-copies the
 countdown, zero hold, ident, and show; no reconnect occurs at their boundaries.
+If YouTube drops the connection mid-show, playout reconnects and rejoins the
+show near where it left off (`[playout] resuming show-<date>.mkv at <s>s`).
 The countdown and zero hold use the website title-card styling: two bold red
 uppercase title lines, a white `HH:MM:SS` timer, and the gray
 `radio.dangerthirdrail.com` domain, centered on black. Styling changes require

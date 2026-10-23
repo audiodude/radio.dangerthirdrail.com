@@ -127,6 +127,73 @@ def test_late_live_gate_preserves_complete_ident_and_first_song(tmp_path):
     assert first_sound / (44100 * 2) >= min(red) / 25 - 0.05
 
 
+def drop_connection(output):
+    """Kill the output ffmpeg, as when YouTube resets the RTMP connection."""
+    subprocess.run(["pkill", "-f", f"flv {output}"], check=True)
+
+
+def test_dropped_connection_rejoins_show_but_restarts_an_unreleased_opening(tmp_path):
+    show = tmp_path / "show-test.mkv"
+    subprocess.run([
+        "ffmpeg", "-nostdin", "-y", "-v", "error",
+        "-f", "lavfi", "-i", "color=red:s=160x90:r=25:d=6[r];color=blue:s=160x90:r=25:d=6[b];"
+                             "[r][b]concat=n=2:v=1:a=0",
+        "-f", "lavfi", "-i", "sine=frequency=997:sample_rate=44100", "-t", "12",
+        "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p", "-g", "25",
+        "-c:a", "aac", "-ar", "44100", "-ac", "2", "-avoid_negative_ts", "disabled", str(show),
+    ], check=True)
+    parts = {
+        "countdown": make_segment(tmp_path / "countdown.mkv", "white", 3),
+        "hold": make_segment(tmp_path / "hold.mkv", "black", 1),
+        "ident": make_segment(tmp_path / "ident.mkv", "green", 1),
+    }
+    show.with_suffix(".opening.json").write_text(json.dumps(parts))
+    (tmp_path / "LATEST").write_text(show.name)
+    state, release = tmp_path / "state.json", tmp_path / "release.json"
+    output = tmp_path / "broadcast.flv"
+    env = dict(os.environ, SHOWS_DIR=str(tmp_path), OUTPUT=str(output),
+               PLAYOUT_STATE=str(state), PLAYOUT_RELEASE=str(release),
+               PLAYOUT_RESTART=str(tmp_path / "restart.json"),
+               PLAYOUT_HEARTBEAT=str(tmp_path / "heartbeat"),
+               WINDOW_CMD="true", SUPERVISE_INTERVAL="0.1", RESUME_BACKUP_SEC="1")
+    with (tmp_path / "playout.log").open("w") as log:
+        process = subprocess.Popen(["bash", str(PLAYOUT)], env=env, stdout=log, stderr=log)
+        try:
+            # Before the release nothing has aired: a drop starts a fresh opening.
+            first = wait_phase(state, "countdown", process)
+            time.sleep(1)
+            drop_connection(output)
+            wait_phase(state, "idle", process)
+            opening = wait_phase(state, "countdown", process)
+            assert opening["run_id"] != first["run_id"]
+            wait_phase(state, "waiting", process)
+            release.write_text(json.dumps({"run_id": opening["run_id"]}))
+            wait_phase(state, "show", process)
+            time.sleep(8)                    # into the blue half of the show
+            drop_connection(output)
+            wait_phase(state, "idle", process)
+            # Rejoined straight into the show, still released under the same run.
+            assert wait_phase(state, "show", process) == {"run_id": opening["run_id"], "phase": "show"}
+            phases = []
+            while (phase := json.loads(state.read_text())["phase"]) != "idle" or not phases:
+                phases.append(phase)
+                time.sleep(0.05)
+            assert set(phases) == {"show"}
+        finally:
+            stop(process)
+    # The output file holds only the resumed connection (ffmpeg -y overwrites):
+    # no opening, picks up ~1 s before the drop (keyframe-aligned), runs to the end.
+    pixels = subprocess.check_output([
+        "ffmpeg", "-v", "error", "-i", str(output), "-map", "0:v:0",
+        "-vf", "scale=1:1", "-pix_fmt", "rgb24", "-fps_mode", "passthrough",
+        "-f", "rawvideo", "pipe:1"])
+    colors = [tuple(pixels[i:i + 3]) for i in range(0, len(pixels), 3)]
+    blue = [c for c in colors if c[2] > 180 and c[0] < 30 and c[1] < 30]
+    assert len(blue) == len(colors)
+    assert 3 * 25 <= len(blue) <= 6 * 25
+
+
+
 def test_legacy_show_without_opening_cannot_go_on_air(tmp_path):
     (tmp_path / "show-old.mkv").write_bytes(b"legacy show")
     (tmp_path / "LATEST").write_text("show-old.mkv")

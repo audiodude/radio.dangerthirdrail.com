@@ -212,9 +212,14 @@ audio, if present, is retained.
 YouTube may become live partway through the countdown. At zero, playout waits
 for the monitor to observe the owned broadcast as `live` with an active stream;
 a successful transition request alone is not enough. The countdown, zero hold,
-ident, and show share one stream-copy RTMP connection. Restarting the transport
-starts a fresh countdown, and stale release commands cannot unlock the new run.
-The monitor resets an already-used opening before publishing another broadcast.
+ident, and show share one stream-copy RTMP connection. If that connection drops
+(YouTube resets it now and then) after the release, playout reconnects within a
+few seconds and rejoins the show where it left off, backing up ~5 s
+(`RESUME_BACKUP_SEC`) to the previous keyframe, under the same run. Any other
+restart, including a drop before the release, starts a fresh countdown, and
+stale release commands cannot unlock the new run. The monitor resets an
+already-used opening before publishing another broadcast, so if YouTube ends
+the broadcast after a drop, the next one still gets a full opening.
 
 The nightly bake publishes `.countdown.mkv`, `.hold.mkv`, `.ident.mkv`, and
 `.opening.json` beside each show. A show without these opening assets is refused,

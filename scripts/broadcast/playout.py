@@ -15,6 +15,10 @@ class Restart(Exception):
     pass
 
 
+class TransportLost(Restart):
+    """The output connection dropped (e.g. YouTube reset it)."""
+
+
 class Stop(Exception):
     pass
 
@@ -98,6 +102,9 @@ class Playout:
         self.next_check = 0.0
         self.next_window = 0.0
         self.next_heartbeat = 0.0
+        self.resume_backup = float(os.environ.get("RESUME_BACKUP_SEC", "5"))
+        self.show_clock = None   # (seek, monotonic or None, furthest reached) from the ident on
+        self.resume = None       # (show, furthest position) to rejoin after a drop; None = fresh
 
     def in_window(self):
         return subprocess.run(self.window, stdin=subprocess.DEVNULL).returncode == 0
@@ -112,7 +119,7 @@ class Playout:
 
     def check(self):
         if self.master.poll() is not None:
-            raise Restart("output ffmpeg exited")
+            raise TransportLost("output ffmpeg exited")
         now = time.monotonic()
         if now < self.next_check:
             return
@@ -127,7 +134,7 @@ class Playout:
             self.next_heartbeat = now + 5
             self.heartbeat.touch()
 
-    def segment(self, path, offset):
+    def segment(self, path, offset, seek=0.0):
         # Each source gets a continuous timestamp range. MPEG-TS carries in-band
         # codec headers across the joins; the master owns pacing and the RTMP
         # connection, so switching to the ident/show never reconnects YouTube.
@@ -135,6 +142,7 @@ class Playout:
         # source independently would overlap it with the next timestamp range.
         self.producer = subprocess.Popen([
             self.ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "warning",
+            *(["-ss", f"{seek:.3f}"] if seek > 0 else []),
             "-i", str(path), "-map", "0:v:0", "-map", "0:a:0", "-c", "copy",
             "-bsf:v", "h264_mp4toannexb", "-output_ts_offset", f"{offset:.6f}",
             "-avoid_negative_ts", "disabled", "-mpegts_copyts", "1",
@@ -149,12 +157,34 @@ class Playout:
             raise Restart(f"segment ffmpeg exited: {path.name}")
         self.producer = None
 
+    def show_position(self):
+        """Furthest show position sent before the connection dropped."""
+        if self.show_clock is None:
+            return None
+        seek, started, furthest = self.show_clock
+        if started is None:                  # dropped during the ident
+            return furthest
+        return max(furthest, seek + time.monotonic() - started)
+
     def play(self, show, parts):
-        self.run_id = str(uuid.uuid4())
+        resume = self.resume
+        self.resume = self.show_clock = None
+        furthest = resume[1] if resume is not None and resume[0] == show else None
+        # Back up from the furthest point (never cumulatively across retries) to
+        # cover what was sent but never reached viewers; the seek also snaps
+        # back to the previous keyframe.
+        resume_at = None if furthest is None else max(0.0, furthest - self.resume_backup)
         self.next_check = self.next_window = self.next_heartbeat = 0.0
-        # Publish the new generation before bringing up transport. Commands from
-        # an earlier connection cannot release this opening.
-        self.phase("countdown")
+        if resume_at is None:
+            self.run_id = str(uuid.uuid4())
+            # Publish the new generation before bringing up transport. Commands
+            # from an earlier connection cannot release this opening.
+            self.phase("countdown")
+        else:
+            # The broadcast is already live and released: keep the run_id so the
+            # release stands, and rejoin the show without another opening.
+            print(f"[playout] resuming {show.name} at {resume_at:.1f}s", flush=True)
+            self.phase("show")
         self.master = subprocess.Popen([
             self.ffmpeg, "-nostdin", "-y", "-hide_banner", "-loglevel", "warning",
             "-re", "-f", "mpegts", "-i", "pipe:0",
@@ -162,24 +192,28 @@ class Playout:
         ], stdin=subprocess.PIPE)
         offset = 0.0
         try:
-            path, duration = parts["countdown"]
-            self.segment(path, offset)
-            offset += duration
-            self.phase("waiting")
-            # Always show zero once. If YouTube is late, continue supplying
-            # silent video instead of consuming any of the ident or first song.
-            while True:
-                path, duration = parts["hold"]
+            if resume_at is None:
+                path, duration = parts["countdown"]
                 self.segment(path, offset)
                 offset += duration
-                if self.matches(self.release):
-                    break
-            self.phase("ident")
-            path, duration = parts["ident"]
-            self.segment(path, offset)
-            offset += duration
-            self.phase("show")
-            self.segment(show, offset)
+                self.phase("waiting")
+                # Always show zero once. If YouTube is late, continue supplying
+                # silent video instead of consuming any of the ident or first song.
+                while True:
+                    path, duration = parts["hold"]
+                    self.segment(path, offset)
+                    offset += duration
+                    if self.matches(self.release):
+                        break
+                self.phase("ident")
+                self.show_clock = (0.0, None, 0.0)
+                path, duration = parts["ident"]
+                self.segment(path, offset)
+                offset += duration
+                self.phase("show")
+                resume_at = furthest = 0.0
+            self.show_clock = (resume_at, time.monotonic(), furthest)
+            self.segment(show, offset, seek=resume_at)
             self.master.stdin.close()
             while self.master.poll() is None:
                 # EOF needs to drain the muxer's final packets before replay.
@@ -207,8 +241,15 @@ class Playout:
                 if show is None:
                     raise ValueError("no show available")
                 parts = opening_parts(show)
-                print(f"[playout] opening for {show.name}", flush=True)
+                if self.resume is None:
+                    print(f"[playout] opening for {show.name}", flush=True)
                 self.play(show, parts)
+            except TransportLost as exc:
+                # Only a drop after the release rejoins the show; earlier drops,
+                # and anything the monitor or window asks for, start fresh.
+                position = self.show_position()
+                self.resume = (show, position) if position is not None else None
+                print(f"[playout] {exc}; reconnecting", flush=True)
             except (KeyError, TypeError, ValueError, OSError, Restart) as exc:
                 print(f"[playout] {exc}; retrying", flush=True)
             time.sleep(3)
