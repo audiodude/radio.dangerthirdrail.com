@@ -84,10 +84,11 @@ def ffprobe_has_audio(path: str) -> bool:
 
 
 UNCUT_SHARE = 0.75   # share of ident-to-ident stretches played as one unbroken piece
+MAX_SEG = 600.0      # longest any one piece stays on screen, in seconds
 
 
 def build_edl(pieces, idents, boundaries, show_dur, dwell, straddle, rng,
-              prev_ident=None, uncut_share=UNCUT_SHARE) -> list[dict]:
+              prev_ident=None, uncut_share=UNCUT_SHARE, max_seg=MAX_SEG) -> list[dict]:
     """rng picks each piece segment's in-point, so a piece that recurs through the
     show doesn't always open on the same frames, and draws each transition's ident
     by catalog weight. Idents always play from 0.
@@ -98,10 +99,11 @@ def build_edl(pieces, idents, boundaries, show_dur, dwell, straddle, rng,
     repeats; with no filler either, the transition becomes a straight cut.
 
     Each stretch between idents is drawn uncut (`uncut_share`) or cut. An uncut
-    stretch plays one piece long enough to cover it; with none long enough it
-    falls back to cut. A cut stretch starts a new piece at every song boundary
-    inside it. Pieces rotate least-recently-used, and the same piece never plays
-    twice in a row, even across an ident.
+    stretch plays one piece long enough to cover it; with none long enough, or
+    the stretch longer than `max_seg`, it falls back to cut. A cut stretch starts
+    a new piece at every song boundary inside it, and mid-song wherever a piece
+    would otherwise outrun `max_seg`. Pieces rotate least-recently-used, and the
+    same piece never plays twice in a row, even across an ident.
 
     `boundaries` and `show_dur` are music-only times. A silent ident straddles its
     song boundary with music underneath; an ident with audio is a break that
@@ -124,18 +126,18 @@ def build_edl(pieces, idents, boundaries, show_dur, dwell, straddle, rng,
 
     def fill(t, end):
         """Cover show time [t, end) with piece segments."""
-        if rng.random() < uncut_share:
+        if rng.random() < uncut_share and end - t <= max_seg + 1e-6:
             piece = take(end - t)
             if piece is not None:
                 edl.append(_piece_seg(piece, end - t, t, rng))
                 return
         inner = [b + shift for b in boundaries if t + 1e-6 < b + shift < end - 1e-6]
         for a, b in zip([t] + inner, inner + [end]):
-            while b - a > 1e-6:     # a song longer than every piece cuts mid-song
-                piece = take(min(b - a, longest))
-                seg_end = min(b, a + piece["dur"])
-                edl.append(_piece_seg(piece, seg_end - a, a, rng))
-                a = seg_end
+            while b - a > 1e-6:     # a song longer than every piece or max_seg cuts mid-song
+                step = min(b - a, longest, max_seg)
+                piece = take(step)
+                edl.append(_piece_seg(piece, step, a, rng))
+                a += step
 
     t = 0.0
     shift = 0.0                     # total break time inserted so far

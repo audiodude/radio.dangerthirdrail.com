@@ -139,6 +139,25 @@ def test_uncut_stretch_falls_back_to_cut_when_no_piece_is_long_enough():
     kinds = [s["kind"] for s in edl]
     assert "piece" in [b for a, b in zip(kinds, kinds[1:]) if a == "piece"]   # cuts happened
 
+def test_no_piece_stays_on_screen_longer_than_max_seg():
+    # 1200 s pieces could cover every stretch uncut; songs alternate 400/900 s, so
+    # stretches outrun the cap and the 900 s songs must also cut mid-song
+    pieces = [_piece(f"p{i}.mp4", 1200.0) for i in range(3)]
+    boundaries, b = [], 0.0
+    for i in range(60):
+        b += 900.0 if i % 2 else 400.0
+        boundaries.append(b)
+    edl = plan.build_edl(pieces, [_piece("a.mp4", 12.0), _piece("b.mp4", 12.0)], boundaries,
+                         show_dur=boundaries[-1], dwell=30.0, straddle=True,
+                         rng=random.Random(0), uncut_share=1.0)
+    segs = [s for s in edl if s["kind"] == "piece"]
+    assert max(s["out"] for s in segs) <= 600.0 + 1e-6
+    assert all(x["src"] != y["src"] for x, y in zip(segs, segs[1:]))
+    edges = [0.0] + boundaries                # ident straddles shift starts by <= 6 s
+    assert any(min(abs(s["tl_start"] - e) for e in edges) > 6.0 for s in segs)  # mid-song cut
+    last = edl[-1]
+    assert abs(last["tl_start"] + last["out"] - boundaries[-1]) < 0.05
+
 def test_ident_weights_set_draw_odds():
     # the previous ident is excluded, so after "b" the draw is a:c at 3:1
     pieces = [_piece("p0.mp4", 1200.0), _piece("p1.mp4", 1200.0)]

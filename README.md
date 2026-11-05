@@ -181,6 +181,8 @@ is deterministic: the date is the seed, so a given night's show can always be re
   `scripts/bake/plan.py`), one piece long enough to cover the whole stretch, which is what
   the 600 s pieces are for, or **cut**: a hard cut to a new piece at each song boundary.
   With no piece long enough, uncut falls back to cut.
+- **10-minute cap**: no piece stays on screen longer than `MAX_SEG` (600 s). A longer
+  stretch is always cut, and a song that would still outrun the cap cuts mid-song.
 - **Rotation**: pieces go least-recently-used and never play twice in a row. Each segment
   starts at a random in-point so repeats don't always open on the same frames.
 - **Song budget**: a song longer than `shortest piece − dwell` can't fit and is dropped
