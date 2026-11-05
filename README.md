@@ -1,77 +1,33 @@
 # 📻 Danger Third Rail Radio
 
-**Six hours of original music a day, over generative visuals no camera ever saw, live on YouTube.**
+**Original music around the clock, over generative visuals no camera ever saw, as a YouTube Station.**
 
-👉 **[radio.dangerthirdrail.com](https://radio.dangerthirdrail.com)** 👈 &nbsp;·&nbsp; daily, **12:00 to 18:00 Pacific**
+👉 **[radio.dangerthirdrail.com](https://radio.dangerthirdrail.com)** 👈 &nbsp;·&nbsp; 24/7
 
-**One URL, forever.** YouTube mints a brand-new video ID for every broadcast, but you never
-need to know it: each day the station flips its own domain from the offline title card to
-that day's fresh live video, then back again at close. No one touches anything.
+A [YouTube Station](https://streampush.co/blog/youtube-stations-explained/) is a "live"
+stream that YouTube itself plays, 24/7, from one playlist of ordinary videos. Nothing
+streams from here. Once a week a box in a Hetzner datacenter bakes a fresh **set**: every
+song from [songs.travisbriggs.com](https://songs.travisbriggs.com) exactly once, in a new
+order, cut into ~67 short videos, each opening with a station ident and playing two or
+three songs over GPU-rendered [vxstory](https://github.com/audiodude/vxstory) pieces
+(supernovae, fluid swirls, peg cascades, cities rising from nothing). It uploads them,
+and on Friday morning swaps them into the station's playlist. The station loops that
+set, about 6.5 hours long, all week.
 
-Every night a box in a Hetzner datacenter wakes at 3 AM, shuffles ~165 songs from
-[songs.travisbriggs.com](https://songs.travisbriggs.com), cuts them against a catalog of
-GPU-rendered [vxstory](https://github.com/audiodude/vxstory) pieces (supernovae, fluid
-swirls, peg cascades, cities rising from nothing), and bakes the whole show into one
-file. At 11:45 a 16-minute countdown goes up on YouTube. At zero, once YouTube actually
-confirms the broadcast is live, an ident plays and the music starts. At 18:05 it all goes
-dark until tomorrow.
-
-Nothing is rendered live. The stream is a single stream copy of a pre-baked file, so the
-box just pushes bytes to YouTube.
+**One URL, forever.** `radio.dangerthirdrail.com` is a fixed 302 to the station.
 
 ---
 
-## 🗓️ A day on air (Pacific time)
+## 🗓️ A week on air (Pacific time)
 
-| Time | What happens |
+| When | What happens |
 |---|---|
-| **03:00** | `radio-bake.timer` fires: sync music + catalog from S3, plan, assemble, render the opening, validate, publish (~2.5 h for a 6 h show) |
-| **11:45** | Operational window opens. Playout starts the **16-minute silent countdown**; the monitor creates the day's broadcast |
-| **12:00** | Consumer window opens. As soon as the broadcast is `live` with an active stream, **`radio.dangerthirdrail.com` flips from the title card to a 302 → today's brand-new `youtube.com/live/<id>`** |
-| **12:01** | Countdown hits zero. Playout **holds** until the monitor sees the broadcast `live` with an active stream, then plays the opening ident, then song #1 from its first note |
-| **18:00** | Consumer window closes: **redirect drops, the title card is back** |
-| **18:05** | Playout stops; broadcast is completed and set private. Tomorrow's broadcast will get a new ID |
-
-Why not 24/7? YouTube deranks channels that never stop streaming. Six hours, then off.
-
-## 🔀 The daily switchover: one domain, a new YouTube ID every day
-
-Every broadcast YouTube creates gets a fresh video ID, so yesterday's link is dead by
-design. The monitor owns `radio.dangerthirdrail.com` and repoints it every day, with no
-DNS changes, no deploys, and nobody at a keyboard:
-
-```mermaid
-sequenceDiagram
-  participant Fan as Listener
-  participant Site as radio.dangerthirdrail.com<br/>(S3 website + CloudFront)
-  participant Mon as Monitor (Railway)
-  participant YT as YouTube
-  Note over Site: Off hours: serves the offline title card
-  Mon->>YT: 11:45 create today's broadcast, bound to our stream key
-  YT-->>Mon: new video ID, e.g. DVpomfNblvc
-  Mon->>YT: go live once the box's stream is active
-  Mon->>YT: poll: broadcast live + stream active?
-  Mon->>Site: 12:00+ add routing rule: 302 → youtube.com/live/NEW_ID
-  Mon->>Site: invalidate CloudFront /*
-  Fan->>Site: GET /
-  Site-->>Fan: 302 → today's live video
-  Mon->>Site: 18:00 drop routing rule, re-upload title card, invalidate
-  Mon->>YT: 18:05 complete broadcast, set private
-```
-
-- **Online** is a single S3 website routing rule: `302` to `www.youtube.com/live/<id>`,
-  then a CloudFront `/*` invalidation so the edge picks it up immediately
-  ([`monitor/redirect.py`](monitor/redirect.py)).
-- **Offline** removes the rule, re-uploads the [title card](assets/radio-offline.html) as
-  `index.html` (`max-age=60`), and invalidates again.
-- It's **reconciled, not scheduled**: every poll compares the bucket's current target with
-  the broadcast that's actually `live` with an active stream
-  ([`monitor/reconcile.py`](monitor/reconcile.py)). Not live yet? The title card stays up.
-  Broadcast replaced mid-day? The redirect follows the new ID on the next poll. Stream
-  gone? Back to the title card. Monitor restarted? It reads the target from the bucket and
-  carries on.
-- **302, never 301.** The target changes every day; a browser that cached a 301 would be
-  stuck on a dead video forever.
+| **Wed 03:00** | `radio-station-bake.timer`: sync music + catalog from S3, plan the set for Friday, encode every VOD at 1080p60 (~10–16 h), validate, publish to S3, hand it to the station job |
+| **hourly** | `radio-station.timer`: upload VODs (unlisted), check YouTube's processing, swap, delete, health-check, alert |
+| **Thu 18:00** | Telegram alert if the new set isn't fully uploaded and processed |
+| **Fri 06:00** | **Swap**: the new VODs are appended to the playlist in order, then last week's are removed. Not ready? Last week's set keeps playing and the swap happens as soon as it is |
+| **Sat** | Last week's videos are deleted |
+| **daily** | Health check: the playlist is exactly the live set, in order, every video processed and unlisted |
 
 ## 🏗️ How it fits together
 
@@ -83,27 +39,22 @@ flowchart LR
   site["songs.travisbriggs.com"] -->|"scripts/library/sync_site.py<br/>trim + loudnorm"| s3m[("S3 music")]
   rc -->|"upload_catalog.sh"| s3c[("S3 catalog")]
   subgraph box["Hetzner box: radio-playout"]
-    bake["radio-bake.timer<br/>plan → assemble → opening → validate"] --> shows[("/data/shows")]
-    shows --> play["radio-playout.service<br/>playout.py + ffmpeg"]
-    health["radio-health<br/>/health · /opening/*"]
+    bake["radio-station-bake (Wed)<br/>plan → assemble → validate"] --> sets[("/data/station/set-‹seed›")]
+    sets --> job["radio-station (hourly)<br/>station.py run"]
   end
   s3m --> bake
   s3c --> bake
-  play -->|"RTMP, stream copy"| yt["YouTube Live"]
-  mon["Railway monitor"] -->|"YouTube Data API"| yt
-  mon -->|"cloudflared tunnel"| health
-  mon -->|"S3 routing rule + CloudFront"| redir["radio.dangerthirdrail.com"]
-  mon --> tg["Telegram alerts"]
-  redir -->|"302"| yt
+  job -->|"upload, playlist edits<br/>YouTube Data API"| yt["YouTube Station<br/>(one playlist)"]
+  job --> tg["Telegram alerts"]
+  redir["radio.dangerthirdrail.com"] -->|"302"| yt
 ```
 
 | Piece | Where | Job |
 |---|---|---|
-| **Render** | [`scripts/render/`](scripts/render/) on a GPU machine | Turn vxstory model + preset + seed into 720p mp4s + `catalog.json` |
+| **Render** | [`scripts/render/`](scripts/render/) on a GPU machine | Turn vxstory model + preset + seed into 1080p60 mp4s + `catalog.json` |
 | **Library** | [`scripts/library/`](scripts/library/README.md) | Mirror the songs site into S3, trimmed and normalized to −21 LUFS |
-| **Bake** | [`scripts/bake/`](scripts/bake/) on the box | Plan + render tomorrow's show and its opening into `/data/shows` |
-| **Broadcast** | [`scripts/broadcast/`](scripts/broadcast/) on the box | Window-gated playout, opening gate, reconnects, health API |
-| **Monitor** | [`monitor/`](monitor/README.md) on Railway | Owns the YouTube broadcast lifecycle, the redirect, and alerts |
+| **Bake** | [`scripts/bake/`](scripts/bake/) on the box | Plan and encode the week's set into `/data/station/set-<seed>/` |
+| **Station** | [`scripts/station/`](scripts/station/) on the box | Uploads, the Friday swap, deletion, health checks, alerts |
 
 ## 🎨 Content: rendering the video catalog
 
@@ -114,18 +65,20 @@ with a GPU and a vxstory checkout (`VXSTORY_DIR`, default `../vxstory`):
 
 ```bash
 # one piece: model, preset, seed, duration, out dir (+ optional --kind ident)
-scripts/render/render_piece.sh supernova_orbit odyssey 101 1200 ./catalog
-# a whole catalog from a committable spec (see scripts/render/specs/)
-scripts/render/render_catalog.sh scripts/render/specs/long-600.json ./catalog
+scripts/render/render_piece.sh supernova_orbit odyssey 101 600 ./catalog_1080
+# a whole catalog from a committable spec (the on-air one is station-1080.json)
+scripts/render/render_catalog.sh scripts/render/specs/station-1080.json ./catalog_1080
 # push to S3: mp4s first, manifest last, so the manifest never references missing files
-scripts/render/upload_catalog.sh ./catalog s3://bucket/catalog/
+scripts/render/upload_catalog.sh ./catalog_1080 s3://bucket/catalog/
 ```
 
 - Pieces render at the models' native **1920×1080@60** (Movie Maker captures the project
-  viewport, so shrinking it would crop rather than scale), then get a Lanczos downscale to
-  **1280×720** in the mp4 encode, which doubles as supersampling AA.
+  viewport, so shrinking it would crop rather than scale). `RENDER_RES` downscales in the
+  encode if you ever want smaller files.
 - Each mp4 gets a sidecar JSON; `make_manifest.py` collects them into
   `catalog.json`: `{"pieces": [{id, kind: piece|ident, model, preset, seed, duration_sec, file, rendered_at}]}`.
+  An optional `title` is the piece's on-screen credit (default: the model in Title Case,
+  `Supernova Orbit`).
 - Renders are serialized (one GPU), idempotent (existing mp4s are skipped, writes are
   atomic), and run about **6× realtime on a 3080 Ti** (~29 min per 300 s piece, encode included).
 - **Hydra** (original Hydra sketches; presets `cells`, `weave`, `glass`, `chrome`, `fold`)
@@ -134,23 +87,21 @@ scripts/render/upload_catalog.sh ./catalog s3://bucket/catalog/
   setup in the vxstory checkout (Node ≥ 24):
   `cd hydra && npm ci && npx playwright install chromium-headless-shell`.
 
-The next nightly bake picks new pieces up automatically.
+The next weekly bake picks new pieces up automatically.
 
 ### 🪧 Idents
 
-Idents are the short station-ID bumpers between stretches. They can be rendered
+Idents are the station-ID bumpers that open every VOD. They can be rendered
 (`--kind ident`) or **hand-made**: drop an mp4 in the catalog dir with a sidecar (`model`
 can be anything, e.g. `handmade`). Optional sidecar fields steer the bake:
 
 | Field | Effect |
 |---|---|
-| `weight` | Relative odds of being drawn at each transition (default `1`) |
-| `opening: true` | Eligible to open the broadcast. With none flagged, any ident may |
-| `filler: true` | Plays when nothing else is available, even right after itself (`text_ident_plz_ignore_s1` is the filler) |
+| `weight` | Relative odds of opening a VOD (default `1`) |
+| `filler: true` | May open two VODs in a row (`text_ident_plz_ignore_s1` is the filler, weight 6) |
 
-A **silent** ident straddles its song boundary with the music running underneath. An ident
-**with audio** is a proper break: the music pauses for it and the rest of the show slides
-later by its length.
+An ident **with audio** is pre-roll: it plays with its own sound, then the first song
+starts. A **silent** ident plays over the start of the first song.
 
 ## 🎵 Music library
 
@@ -163,152 +114,136 @@ python3 scripts/library/sync_site.py           # dry run: + uploads, ~ re-proces
 python3 scripts/library/sync_site.py --apply   # actually change S3
 ```
 
-`scripts/bake/song_denylist.txt` keeps songs (covers, over-length tracks) off air even when
+`scripts/bake/song_denylist.txt` keeps songs (covers, a few long tracks) off air even when
 they're in the library. Full details, including why −21 and not −14:
 [`scripts/library/README.md`](scripts/library/README.md).
 
-## 🍞 The bake: how a show gets planned
+## 🍞 The bake: how a set gets planned
 
-`scripts/bake/bake.sh` runs **plan → assemble → opening → validate → publish**. The plan
-is deterministic: the date is the seed, so a given night's show can always be re-derived.
+`scripts/bake/bake.sh` runs **target → plan → assemble → validate → publish → register**.
+The plan is deterministic: the seed is the date of the Friday the set goes on air, so a
+week's set can always be re-derived.
 
-- **Music**: endless seeded shuffle of the library (never the same song twice in a row,
-  even across a pass seam) until the target length (`SHOW_DUR`, default 22800 s ≈ 6.3 h) is filled.
-- **Ident spacing**: at least **two songs apart** (the opening ident counts as sitting
-  before song #1), never the same ident twice in a row except the filler, and never before
-  `BAKE_DWELL` seconds of the current stretch have played.
-- **Uncut vs cut**: each stretch between idents is drawn **uncut** (75%, `UNCUT_SHARE` in
-  `scripts/bake/plan.py`), one piece long enough to cover the whole stretch, which is what
-  the 600 s pieces are for, or **cut**: a hard cut to a new piece at each song boundary.
-  With no piece long enough, uncut falls back to cut.
+- **Target**: the coming Friday. Skipped if a set is already waiting, or if the live set
+  went on air less than 4 days before that Friday (so a mid-week launch gets a full first
+  week). `bake.sh --now` bakes a launch set that swaps in as soon as it's uploaded.
+- **Songs**: the whole library in a seeded shuffle, each song **exactly once**, cut into
+  **stretches of 2 or 3 songs**, one VOD each.
+- **Idents**: one per VOD, drawn by weight, never the same one on two VODs in a row (the
+  filler excepted), including from the last VOD back to the first.
+- **Uncut vs cut**: each stretch is drawn **uncut** (75%, `UNCUT_SHARE` in
+  `scripts/bake/plan.py`), one piece under every song, which is what the 600 s pieces are
+  for, or **cut**: a hard cut to a new piece at each song boundary. Uncut needs a piece
+  long enough; otherwise it's cut.
 - **10-minute cap**: no piece stays on screen longer than `MAX_SEG` (600 s). A longer
   stretch is always cut, and a song that would still outrun the cap cuts mid-song.
-- **Rotation**: pieces go least-recently-used and never play twice in a row. Each segment
-  starts at a random in-point so repeats don't always open on the same frames.
-- **Song budget**: a song longer than `shortest piece − dwell` can't fit and is dropped
-  (listed as `excluded_songs` in the plan). Render longer pieces to bring long tracks back.
+- **Rotation**: pieces go least-recently-used across the whole set and never play twice in
+  a row, even across VODs and the loop seam. Each segment starts at a random in-point.
 - **Titles**: each song's name is burned in as a `♪ Song Title` ASS subtitle that fades in
-  and out.
-- **Encode**: one video encode pass, H.264 **CBR** (`BAKE_VBITRATE`, default 6 Mbps) at
-  720p60 with fixed GOPs, so the result is safe to stream-copy straight to RTMP.
+  and out. The VOD's YouTube title is `Song A - Song B (Render, Render)` (≤ 100 chars:
+  every song kept, renders truncated with `...`); the description is the station blurb
+  (`/etc/radio-blurb.txt`), the songs with links, and the render credits.
+- **Encode**: per VOD, x264 `slow` CRF 18 with a 20 Mbps peak cap (`BAKE_PRESET`,
+  `BAKE_CRF`, `BAKE_MAXRATE`), GOP 30, AAC 384 kbps 48 kHz, `+faststart` MP4. The cap keeps
+  a set under ~58 GB. VODs are written atomically and skipped on a re-run, so a crashed
+  bake resumes (unless the plan changed, which discards them).
 
-Output lands in `/data/shows`: `show-<date>.mkv` + `.plan.json`, plus the opening bundle
-(`.countdown.mkv`, `.hold.mkv`, `.ident.mkv`, `.opening.json`). Everything is published to
-S3 before `LATEST` moves, and both local and S3 copies older than `RETENTION_DAYS` (3) are pruned.
+Output: `/data/station/set-<seed>/` with `plan.json` + `vod-000.mp4…`, copied to
+`$S3_SHOWS_URI/set-<seed>/`. At each swap, every set other than the live one and the one
+waiting is pruned, locally and in S3.
 
-## 🚦 The opening gate
+## 🛰️ The station job
 
-The first song never plays to an empty room. Playout runs this sequence on **one**
-stream-copied RTMP connection:
+`scripts/station/station.py run`, hourly, idempotent and resumable at every step. State
+lives in `/data/station/state.json` (atomic writes, `flock`).
 
-```mermaid
-stateDiagram-v2
-  [*] --> countdown: 11:45, fresh run UUID
-  countdown --> waiting: 16:00 elapsed
-  waiting --> ident: monitor sees broadcast live + stream active → POST /opening/release
-  ident --> show: opening ident ends
-  show --> show: RTMP drop → reconnect, rejoin ~5 s back
-  show --> countdown: POST /opening/restart (new broadcast needed)
-  countdown --> countdown: any other restart
-```
-
-- The countdown and zero hold match the website title card: big red uppercase
-  `DANGER THIRD RAIL` over `RADIO`, a white `HH:MM:SS` timer, the gray domain on black.
-- **Only an observed `live` broadcast with an active stream releases the music.** A
-  successful transition request, or the `testing` state, is not enough.
-- Every transport attempt gets a new UUID; `/opening/release` and `/opening/restart`
-  must quote it, so a stale command from an earlier connection gets a 409.
-- YouTube resets RTMP connections now and then. After release, playout reconnects within
-  seconds and **rejoins the show where it left off**, backing up `RESUME_BACKUP_SEC` (5 s)
-  to the previous keyframe. A drop before release starts a fresh countdown.
-- A show without its opening bundle is refused. There is no direct-to-show fallback.
-
-## 🛰️ The monitor
-
-A small Python loop on Railway ([`monitor/`](monitor/README.md)): gather state (windows,
-broadcasts, stream status, box health) → pure `reconcile.plan_actions` → execute → alert →
-sleep until the next poll (`POLL_INTERVAL`, 120 s) or window edge.
-
-- Creates the day's broadcast with **pinned** `BROADCAST_TITLE` / `BROADCAST_DESCRIPTION`,
-  bound to the stream whose key matches `YOUTUBE_STREAM_KEY`. Studio edits don't carry over
-  to tomorrow; the env vars do.
-- Releases or restarts the opening on the box over the Cloudflare tunnel
-  (`radio-sys.dangerthirdrail.com`, bearer-authed, `DangerThirdRailMonitor/1.0` user agent).
-- Drives the [daily switchover](#-the-daily-switchover-one-domain-a-new-youtube-id-every-day)
-  of `radio.dangerthirdrail.com` between the title card and today's live video ID.
-- Telegram alerts when things degrade. `FORCE_ACTIVE=1` makes it always-on for testing.
+- **Playlist**: created by the first run (public, `Danger Third Rail radio // Shocking
+  Visuals!`, blurb as description) and announced on Telegram; the station is bound to it
+  once in Studio. The box owns it: at each swap, anything that isn't the new set goes.
+- **Uploads**: resumable, unlisted, category Music, not made for kids, no subscriber
+  notification. The session URL is saved before any bytes go out, so a crash resumes
+  instead of duplicating. YouTube's per-channel upload cap (`uploadLimitExceeded`) pauses
+  uploads for 24 h; failed or rejected processing re-uploads.
+- **Swap**: append the new set in order, then remove the old items, so the playlist is
+  never empty. A swap interrupted halfway finishes on the next run; a playlist found out
+  of order is left alone and alerted.
+- **Quota**: a swap is ~6,700 of the 10,000 daily units and deleting a set ~3,350, hence
+  Friday + Saturday. `quotaExceeded` pauses everything until Pacific midnight.
+- **Alerts** (Telegram, each once per incident): bake failure, not ready Thursday evening,
+  swap overdue, upload cap, quota, repeated upload/processing failure, health check
+  failed/recovered, unexpected errors, and one message per swap.
 
 ## 🛠️ Operating it
 
-The [**go-live runbook**](docs/go-live-runbook.md) is the source of truth for deploys,
-rollouts, and the full verification list. The greatest hits:
+The [**runbook**](docs/go-live-runbook.md) is the source of truth for deploys and
+first-time setup. The greatest hits:
 
 ```bash
-# bake by hand (normally the 03:00 timer does it)
-ssh radio-playout 'sudo systemctl start radio-bake.service'
-ssh radio-playout 'journalctl -u radio-bake -f'
+# what's live, what's waiting, upload/processing progress
+ssh radio-playout 'sudo python3 /opt/radio/scripts/station/station.py status'
 
-# is it alive? (playout_alive, ffmpeg_alive, heartbeat_age_s, opening phase)
-curl -A DangerThirdRailMonitor/1.0 -H "Authorization: Bearer $BOX_HEALTH_TOKEN" https://radio-sys.dangerthirdrail.com/health
+# run the station job now (uploads, swap if due) and watch it
+ssh radio-playout 'sudo systemctl start radio-station.service; journalctl -u radio-station -f'
 
-# 🔴 KILL SWITCH: off air now, and stay off
-ssh radio-playout 'sudo systemctl stop radio-playout'
-ssh radio-playout 'sudo systemctl disable radio-playout radio-bake.timer'
+# bake by hand (normally Wednesday's timer does it)
+ssh radio-playout 'sudo systemctl start radio-station-bake.service'
+ssh radio-playout 'journalctl -u radio-station-bake -f'
 ```
 
-**Deploys.** The monitor deploys from the `release` branch on Railway (merge `main` →
-`release` with a regular merge, never a squash). The box runs a checkout in `/opt/radio`;
-bake and broadcast script changes ship by updating it, ideally outside the window. Some
-changes (opening gate, health API) must ship to the box and the monitor together: see the
-runbook's rollout order.
-
-**Local playout without YouTube.** Set `OUTPUT` to a file path to write FLV locally
-(no stream key needed), `WINDOW_CMD=true` to ignore the schedule, and private paths for
-`PLAYOUT_STATE`, `PLAYOUT_RELEASE`, `PLAYOUT_RESTART`, `PLAYOUT_HEARTBEAT`. The live gate
-still applies, so you'll have to release it yourself.
+**Deploys.** The box runs a checkout of the `release` branch in `/opt/radio`: merge `main`
+→ `release` (a regular merge, never a squash), push, then `git pull` there. Ship bake
+changes before Wednesday 03:00 PT.
 
 ## 🧪 Tests
 
-Decoded-media fixtures and a local HTTP harness exercise the bake, the opening gate, and
-the monitor without touching YouTube:
+Decoded-media fixtures and an in-memory YouTube exercise the planner, the encode and the
+station job without touching YouTube:
 
 ```bash
-uv run --with pytest --with boto3 python -m pytest monitor/tests scripts/broadcast/tests scripts/bake/tests -q
+uv run --with pytest python -m pytest scripts/bake/tests scripts/station/tests -q
 ```
 
 ## 🩹 Scar tissue
 
 Things this station learned the hard way, and the design they left behind:
 
-- **"The stream dies after ~30 s."** The old live pipeline under-supplied frames at
-  transitions and slowly drained YouTube's buffer. Lesson: never let the encoder starve.
-  Today's answer is even simpler: pre-bake everything and stream-copy.
-- **Pinned, not cloned.** The monitor once cloned title, description *and* bound stream from
-  the newest broadcast on the account. A test broadcast on a second key became "newest", so
-  production got bound to the test key, auto-start never fired, and a ~16-minute
-  create/stale/delete loop followed. Broadcasts are now bound by stream key with pinned
-  metadata, so **test broadcasts on another key can't touch production**.
-- **403 `invalidTransition` at every go-live.** YouTube defaults `enableMonitorStream` to
-  true, and such a broadcast can't go `ready → live` without passing through `testing`.
-  Broadcasts are now created with it off, with a `testing` fallback for old ones.
 - **2:17 of dead air.** One "mp3" was actually AIFF/PCM; the concat demuxer can't switch
-  decoders mid-stream and decoded it to nothing. Every song is now decoded to identical PCM
-  and clamped to its planned slot before concat.
-- **Cloudflare vs Python.** Cloudflare challenged Python's default user agent, hence the
-  monitor's `DangerThirdRailMonitor/1.0` identity.
-- **No 301s, ever.** The redirect target changes daily; browsers cache 301s forever.
+  decoders mid-stream and decoded it to nothing. Every song is now decoded to identical
+  PCM and clamped to its planned slot before concat.
+- **YouTube's playlist reads lag its writes.** Right after a swap, `playlistItems.list`
+  still returned half the new set. The health check waits 30 minutes after a swap.
+- **A set is big.** Uncapped CRF 18 put one 1080p60 render at 39 Mbps; two weeks of that
+  doesn't fit on the box. Hence the 20 Mbps peak cap (YouTube re-encodes to far less).
+- **No 301s, ever.** Browsers cache 301s forever; the redirect is a 302.
 
 ## 📚 More docs
 
-- [Go-live runbook](docs/go-live-runbook.md): render → catalog → bake → playout → monitor, rollout order, kill switch
-- [Monitor](monitor/README.md): env vars and the first-song gate protocol
+- [Runbook](docs/go-live-runbook.md): content, first-time setup, deploys, kill switch
 - [Music library tools](scripts/library/README.md): sync, normalization, silence cleanup
-- [Design specs and plans](docs/superpowers/): the monitor and box-side playout designs
+- [Design specs and plans](docs/superpowers/): the station design and its predecessors
 - [TODO.md](TODO.md): content and infrastructure roadmap
 
 ---
 
 ## 🦴 Fossil record
+
+<details>
+<summary>📡 The daily live broadcast (June → November 2026)</summary>
+
+Before the station, the box streamed a pre-baked six-hour show to YouTube Live every day,
+12:00–18:00 PT, and a Railway monitor owned the broadcast. Every night a 03:00 bake
+planned a ~6.3 h show and stream-copied it over RTMP; at 11:45 a 16-minute countdown went
+up, and the monitor created the day's broadcast, released the music only once YouTube
+reported it `live` with an active stream, and flipped `radio.dangerthirdrail.com` between
+an offline title card and that day's new video ID (a reconciled S3 routing rule + a
+CloudFront invalidation). Its lessons: never let the encoder starve ("the stream dies
+after ~30 s"); bind broadcasts by stream key with pinned metadata, not cloned from the
+newest broadcast (a test key once hijacked production); create broadcasts with
+`enableMonitorStream` off (403 `invalidTransition`); give scripted clients a real user
+agent behind Cloudflare. Its code (`scripts/broadcast/`, `scripts/bake/opening.py`, `monitor/`) was removed at
+the station cutover; it lives in git history.
+
+</details>
 
 Before vxstory, this station was a **Godot Galton board** (a bean machine raining balls
 into a bell curve, with live chat reactions) streamed 24/7 from Railway. Its code is still

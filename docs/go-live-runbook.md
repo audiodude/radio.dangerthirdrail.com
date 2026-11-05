@@ -1,42 +1,34 @@
-# Go-live runbook (vxstory pre-baked playout)
+# Station runbook
 
-The steady state: **render → S3 catalog → nightly bake (03:00 PT) → window-gated
-playout (11:45–18:05 PT) → monitor owns the YouTube broadcast + redirect.**
-Playout starts with a **16-minute silent countdown**, then a complete ident,
-then the first song from its beginning. A normal 11:45 start reaches zero at
-12:01 PT; the radio redirect still opens at noon.
+The steady state: **render → S3 catalog → weekly bake (Wed 03:00 PT) → hourly
+station job uploads → Friday 06:00 PT swap into the station's playlist.**
+Design: [specs/2026-11-05-youtube-station-design.md](superpowers/specs/2026-11-05-youtube-station-design.md).
 
 ## Add content (render host, needs the GPU)
 
     cd ~/code/vibes/radio.dangerthirdrail.com
     # spec = [{model, preset, seed, duration_sec, kind}] — see scripts/render/specs/
-    ./scripts/render/render_catalog.sh scripts/render/specs/<spec>.json catalog_v2
+    ./scripts/render/render_catalog.sh scripts/render/specs/<spec>.json catalog_1080
     eval "$(ssh -n radio-playout 'sudo grep -E "^AWS_(ACCESS_KEY_ID|SECRET_ACCESS_KEY|DEFAULT_REGION)=" /etc/radio.env' | sed 's/^/export /')"
-    ./scripts/render/upload_catalog.sh catalog_v2 s3://music-backup-996646211514-us-west-1-an/catalog
+    ./scripts/render/upload_catalog.sh catalog_1080 s3://music-backup-996646211514-us-west-1-an/catalog
 
-`render_catalog.sh` skips pieces whose mp4 already exists, so it is resumable.
-`upload_catalog.sh` uploads mp4s first and `catalog.json` last — a bake that
-starts mid-upload still sees a consistent manifest. The next nightly bake picks
-new pieces up automatically; nothing else has to be touched.
+`catalog_1080/` is the local source of truth for the S3 catalog: `upload_catalog.sh`
+rebuilds `catalog.json` from the sidecars in that directory, so it must hold every
+piece and ident, including the hand-made idents and their sidecars. Re-rendering a
+piece overwrites its sidecar: carry over hand-added fields (`weight`, `filler`,
+`title`) afterwards. `render_catalog.sh` skips pieces whose mp4 already exists, so it
+is resumable; `upload_catalog.sh` uploads mp4s first and `catalog.json` last, so a
+bake that starts mid-upload still sees a consistent manifest. The next weekly bake
+picks new pieces up.
 
-Roughly 30 min of render time per 300 s piece on an RTX 3080 Ti (1080p60 into
-a temp AVI, Lanczos-downscaled to 720p at CRF 18).
-
-### Piece length sets the music budget
-
-`plan.py` cuts video at song boundaries: a piece segment runs `dwell + the rest
-of the current song`, so it must fit inside the **shortest** piece. Songs longer
-than `min_piece - dwell` are dropped from the show (listed as `excluded_songs`
-in the plan, and printed by the bake). With 300 s pieces and `BAKE_DWELL=30`
-the cap is 270 s. Want the long tracks on air? Render longer pieces, and remove
-them from the denylist below.
+Roughly 30 min of render time per 300 s piece on an RTX 3080 Ti (1080p60 into a
+temp AVI, then CRF 18).
 
 ### Song denylist
 
-`scripts/bake/song_denylist.txt` lists song filenames the bake never plans,
-even when they are in the S3 library (covers kept off air, plus the current
-over-length tracks). Edit it on `main`, merge to `release`, and `git pull` in
-`/opt/radio` on the box; the next bake picks it up.
+`scripts/bake/song_denylist.txt` lists song filenames the bake never plans, even
+when they are in the S3 library. Edit it on `main`, merge to `release`, and
+`git pull` in `/opt/radio` on the box; the next bake picks it up.
 
 ### Music library
 
@@ -44,126 +36,81 @@ The S3 music library mirrors songs.travisbriggs.com: run
 `scripts/library/sync_site.py` (dry run) then `--apply`, with the box's AWS keys
 (as above) plus `S3_MUSIC_BUCKET`. See `scripts/library/README.md`.
 
-The sync stores every song trimmed and loudness-normalized (gain-only) to the
-on-air level, −21 LUFS / ≤ −1 dBTP, and the bake plays the files as they are
-(no gain in `assemble.py`). Songs uploaded before normalization show up as `~`
-in the dry run; `--apply` re-makes them from the site. Rolling out a level
-change (including the first one, which retired the bake's old blanket −7 dB):
-run `sync_site.py --apply` and update `/opt/radio/scripts/bake/` on the box on
-the same day, before the 03:00 PT bake; otherwise one show plays the old songs
-7 dB hot, or the new songs 7 dB quiet.
+## Box setup (once)
 
-## Bake by hand (normally the timer does this)
+    ssh radio-playout
+    cd /opt/radio && sudo git pull
+    sudo cp scripts/systemd/radio-station*.{service,timer} /etc/systemd/system/
+    sudo systemctl daemon-reload
 
-    ssh radio-playout 'sudo systemctl start radio-bake.service'   # ~2.5 h for a 6 h show
-    ssh radio-playout 'journalctl -u radio-bake -f'
+`/etc/radio.env` (root-only) needs, besides the AWS and `S3_*` entries:
 
-Output: `/data/shows/show-<date>.mkv` + `.plan.json`, plus `.countdown.mkv`,
-`.hold.mkv`, `.ident.mkv`, and `.opening.json`. The opening manifest records
-each segment's filename and timeline duration, including AAC preroll/padding
-needed for non-overlapping packet timestamps. The visible countdown is exactly
-960 seconds. All assets are published to S3 before
-`/data/shows/LATEST` is updated. `RETENTION_DAYS=3` covers the whole bundle.
-At 6 Mbps, the countdown adds approximately 720 MB per show.
-
-The opening ident is drawn by the planner from catalog idents flagged
-`"opening": true` (any ident if none are flagged) and played in full from zero.
-Its own audio is retained if present; otherwise it is silent. First-song audio
-begins only after it finishes.
-
-## Startup safety and rollout
-
-`playout.sh` launches `playout.py`. One FFmpeg connection stream-copies the
-countdown, zero hold, ident, and show; no reconnect occurs at their boundaries.
-If YouTube drops the connection mid-show, playout reconnects and rejoins the
-show near where it left off (`[playout] resuming show-<date>.mkv at <s>s`).
-The countdown and zero hold use the website title-card styling: two bold red
-uppercase title lines, a white `HH:MM:SS` timer, and the gray
-`radio.dangerthirdrail.com` domain, centered on black. Styling changes require
-regenerating the opening assets; already-baked videos do not update automatically.
-The bake host needs an Arial-compatible font: install `fonts-liberation` with
-`sudo apt-get install -y fonts-liberation`; `fc-match Arial` should select
-Liberation Sans. To deploy a styling-only update, replace
-`/opt/radio/scripts/bake/opening.py` before the next nightly bake; no playout
-restart or current-show regeneration is needed.
-At zero, playout continues silent zero frames until the monitor confirms the
-owned broadcast is listed `live` and the stream is active. A transition request
-or `testing` state cannot release the ident or music.
-
-Each transport attempt has a new UUID. The authenticated health service exposes
-`opening: {run_id, phase, released}` and accepts matching-UUID commands at
-`POST /opening/release` and `/opening/restart`. Late commands for an earlier
-connection return 409. If a new broadcast is needed after an opening has already
-been released, the monitor restarts the opening before making it live.
-Missing box state or opening assets fails closed; there is no direct-show fallback.
-
-Deploy the updated bake scripts, playout scripts, health service, and Railway
-monitor together, preferably outside the operational window:
-
-1. Update `/opt/radio/scripts/bake/` and `/opt/radio/scripts/broadcast/` on the
-   box. Keep playout stopped during an in-window rollout.
-2. Generate opening assets for the current show before enabling the new runtime.
-   A full bake does this automatically. To keep an existing show without rebaking
-   its music/video, run on the box:
-
-       SHOW="$(cat /data/shows/LATEST)"
-       sudo systemd-run --wait --collect -p EnvironmentFile=/etc/radio.env \
-         /usr/bin/python3 /opt/radio/scripts/bake/opening.py \
-         --plan "/data/shows/${SHOW%.mkv}.plan.json" --show "/data/shows/$SHOW"
-
-   This requires the plan's ident source to remain available locally. Publish
-   the new opening bundle alongside the show if restoring shows from S3.
-3. Ensure the cloudflared route for `radio-sys.dangerthirdrail.com` forwards
-   `/opening/*` to the health service as well as `/health`. Restart
-   `radio-health.service` and `radio-playout.service`.
-4. Deploy the monitor through the normal `main` → `release` merge and push.
-   An old health service blocks the new monitor; an old monitor leaves the new
-   playout holding at zero. Complete both sides before expecting music.
-
-The health and playout services share these paths (override both services
-identically if needed):
-
-| Environment variable | Default |
+| Variable | Value |
 |---|---|
-| `PLAYOUT_STATE` | `/tmp/playout_state.json` |
-| `PLAYOUT_RELEASE` | `/tmp/playout_release.json` |
-| `PLAYOUT_RESTART` | `/tmp/playout_restart.json` |
-| `PLAYOUT_HEARTBEAT` | `/tmp/playout_heartbeat` |
+| `YOUTUBE_CLIENT_ID`, `YOUTUBE_CLIENT_SECRET`, `YOUTUBE_REFRESH_TOKEN` | OAuth client + refresh token with `youtube.force-ssl` (`scripts/youtube_oauth.py` mints one) |
+| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Alert bot and chat |
+| `MUSIC_DIR`, `CATALOG_DIR` | `/data/music`, `/data/catalog` |
+| `BAKE_RES` | `1920x1080` (or unset) |
+| Optional | `STATION_DIR` (`/data/station`), `STATION_BLURB_FILE` (`/etc/radio-blurb.txt`), `STATION_PLAYLIST_TITLE`, `BAKE_MIN_FREE_GB` (70), `BAKE_PRESET`/`BAKE_CRF`/`BAKE_MAXRATE`/`BAKE_BUFSIZE` |
 
-`SHOWS_DIR` defaults to `/data/shows`. For isolated local runs, `OUTPUT` writes
-FLV to a file instead of YouTube and does not require `YOUTUBE_STREAM_KEY`;
-`WINDOW_CMD=true` bypasses the schedule. Use private paths for all four state
-files above. The live-confirmation gate still applies to local output.
-The decoded-media and local HTTP regression suite exercises it without YouTube:
+`/etc/radio-blurb.txt` opens every VOD description and is the playlist's
+description: plain text, multiple lines are fine.
 
-    uv run --with pytest --with boto3 python -m pytest monitor/tests scripts/broadcast/tests scripts/bake/tests -q
+## Launch (first set)
 
-## Go live
+1. Bake a launch set that swaps in as soon as it's processed (~10–16 h of
+   encoding; it runs under systemd, so it survives SSH disconnects):
 
-    ssh radio-playout 'sudo systemctl enable --now radio-bake.timer'
-    ssh radio-playout 'sudo systemctl enable --now radio-playout.service'
-    # resume the Railway monitor (owns broadcast lifecycle + redirect)
-    curl -sS -X POST https://backboard.railway.com/graphql/v2 \
-      -H "Authorization: Bearer $CLAUDE_RAILWAY_TOKEN" -H "Content-Type: application/json" \
-      -d '{"query":"mutation { deploymentRedeploy(id: \"<latest-deployment-id>\") { id status } }"}'
+       sudo systemd-run --unit=radio-station-bake-now -p EnvironmentFile=/etc/radio.env \
+         /usr/bin/env bash /opt/radio/scripts/bake/bake.sh --now
+       journalctl -u radio-station-bake-now -f
 
-Both sides self-gate to the operational window, so enabling them outside it is
-safe — playout idles until 11:45 PT and the monitor sleeps to the next boundary.
+2. The bake starts `radio-station.service`, which creates the playlist (Telegram
+   posts its URL), uploads, and fills it once every VOD is processed. Then enable
+   the schedule:
 
-## Verify (during the window)
+       sudo systemctl enable --now radio-station.timer radio-station-bake.timer
 
-- `ssh radio-playout 'systemctl status radio-playout'` — FFmpeg streaming the opening/show through one master connection.
-- `curl -A DangerThirdRailMonitor/1.0 -H "Authorization: Bearer $BOX_HEALTH_TOKEN" https://radio-sys.dangerthirdrail.com/health` — `playout_alive`, `ffmpeg_alive`, fresh `heartbeat_age_s`, and `opening`.
-- YouTube Studio: stream `active` → broadcast `live` during the countdown.
-- `opening.phase`: `countdown` → `waiting` → `ident` → `show`; `released` becomes true only after observed live confirmation. A late confirmation holds at zero, without consuming the song.
-- `radio.dangerthirdrail.com` redirects to the live video from 12:00 PT; the complete first song follows the opening ident after the countdown.
-- At 18:05 PT: box stops → broadcast completes → redirect goes offline.
+3. **Manual, in YouTube Studio:** start the station on that playlist.
+4. Point the domain at the station (one fixed 302; `<path>` is the station's
+   URL path on www.youtube.com, e.g. `watch?v=ID`):
+
+       aws s3api put-bucket-website --bucket radio.dangerthirdrail.com --website-configuration \
+         '{"IndexDocument":{"Suffix":"index.html"},"RoutingRules":[{"Redirect":{"HostName":"www.youtube.com","HttpRedirectCode":"302","Protocol":"https","ReplaceKeyWith":"<path>"}}]}'
+       aws cloudfront create-invalidation --distribution-id E24RTA588S2VSH --paths '/*'
+
+The next scheduled swap is the first Friday at least 4 days after launch.
+
+## Deploys
+
+The box runs the `release` branch in `/opt/radio`. Merge `main` → `release` with a
+regular merge (never a squash), push, then `cd /opt/radio && sudo git pull`. Unit
+file changes also need the copy + `daemon-reload` above. Ship bake changes before
+Wednesday 03:00 PT; a bake already running keeps the code it started with.
+
+## Verify
+
+- `sudo python3 /opt/radio/scripts/station/station.py status`: the live set, the
+  waiting set's upload/processing progress, active alerts.
+- `systemctl list-timers 'radio-station*'`: Wednesday bake and hourly job scheduled.
+- `journalctl -u radio-station-bake` / `-u radio-station`.
+- After a swap: the playlist in Studio holds only the new set; the station plays it.
+
+## When things go wrong
+
+- **Bake failed** (Telegram): fix, then `sudo systemctl start radio-station-bake`.
+  It resumes: finished VODs are kept unless the plan changed (new songs or pieces).
+- **Not ready / swap overdue**: `status` shows what's missing. Uploads paused by
+  YouTube's cap resume by themselves after 24 h; the swap happens on the first
+  hourly run after the last VOD is processed.
+- **Playlist order unexpected**: someone edited the playlist mid-swap. Remove the
+  new set's items from it (or restore the old order) and let the next run retry.
+- **Re-bake a waiting set from scratch**: delete its entry from `state.json` and its
+  `set-<seed>` directory, then start the bake.
 
 ## Kill switch
 
-    ssh radio-playout 'sudo systemctl stop radio-playout'          # off air now
-    ssh radio-playout 'sudo systemctl disable radio-playout radio-bake.timer'
+    ssh radio-playout 'sudo systemctl disable --now radio-station.timer radio-station-bake.timer'
 
-Stopping playout stops sending media immediately. The monitor completes the
-broadcast at the operational window's end. Run playout only through its single
-systemd service; do not launch a second writer to the same stream key/state files.
+That stops all uploads and swaps; the station keeps looping the current playlist.
+To take it off air, stop the station in YouTube Studio.

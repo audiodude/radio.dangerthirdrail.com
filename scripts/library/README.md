@@ -34,8 +34,8 @@ downloads nothing, so it can't predict gains; `--apply` prints each song's
 before/after loudness and ends with the list of capped songs.
 
 Needs `S3_MUSIC_BUCKET` and AWS credentials (the box's, as in the
-[runbook](../../docs/go-live-runbook.md)). The nightly bake mirrors S3 to the
-box with `--delete`, so changes reach the next show automatically.
+[runbook](../../docs/go-live-runbook.md)). The weekly bake mirrors S3 to the
+box with `--delete`, so changes reach the next set automatically.
 
 ### Loudness normalization
 
@@ -63,8 +63,8 @@ bake (`scripts/bake/assemble.py`) adds no gain of its own.
 
 **Order matters when changing the level:** the bake plays files as-is, so S3
 songs and `assemble.py` must agree. Ship them together, between bakes (the
-timer runs at 03:00 PT): `sync_site.py --apply` and deploy the matching bake
-scripts the same day.
+timer runs Wednesdays at 03:00 PT): `sync_site.py --apply` and deploy the
+matching bake scripts before the next one.
 
 ## Silence cleanup
 
