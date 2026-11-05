@@ -1,0 +1,163 @@
+[
+  {
+    "model": "fluid_swirl",
+    "preset": "lava_lamp",
+    "seed": 501,
+    "duration_sec": 600,
+    "kind": "piece"
+  },
+  {
+    "model": "metro_rise",
+    "preset": "boomtown",
+    "seed": 502,
+    "duration_sec": 600,
+    "kind": "piece"
+  },
+  {
+    "model": "peg_cascade",
+    "preset": "zen_garden",
+    "seed": 503,
+    "duration_sec": 600,
+    "kind": "piece"
+  },
+  {
+    "model": "supernova_orbit",
+    "preset": "slow_burn_long",
+    "seed": 505,
+    "duration_sec": 600,
+    "kind": "piece"
+  },
+  {
+    "model": "radial_burst",
+    "preset": "pulsar",
+    "seed": 201,
+    "duration_sec": 300,
+    "kind": "piece"
+  },
+  {
+    "model": "peg_cascade",
+    "preset": "clockwork",
+    "seed": 202,
+    "duration_sec": 300,
+    "kind": "piece"
+  },
+  {
+    "model": "fluid_swirl",
+    "preset": "aurora",
+    "seed": 203,
+    "duration_sec": 300,
+    "kind": "piece"
+  },
+  {
+    "model": "matter_cycle",
+    "preset": "tides",
+    "seed": 204,
+    "duration_sec": 300,
+    "kind": "piece"
+  },
+  {
+    "model": "chromatic_cascade",
+    "preset": "fresco",
+    "seed": 205,
+    "duration_sec": 300,
+    "kind": "piece"
+  },
+  {
+    "model": "supernova_orbit",
+    "preset": "odyssey",
+    "seed": 206,
+    "duration_sec": 300,
+    "kind": "piece"
+  },
+  {
+    "model": "radial_burst",
+    "preset": "pulsar",
+    "seed": 301,
+    "duration_sec": 300,
+    "kind": "piece"
+  },
+  {
+    "model": "peg_cascade",
+    "preset": "clockwork",
+    "seed": 302,
+    "duration_sec": 300,
+    "kind": "piece"
+  },
+  {
+    "model": "fluid_swirl",
+    "preset": "aurora",
+    "seed": 303,
+    "duration_sec": 300,
+    "kind": "piece"
+  },
+  {
+    "model": "matter_cycle",
+    "preset": "tides",
+    "seed": 304,
+    "duration_sec": 300,
+    "kind": "piece"
+  },
+  {
+    "model": "chromatic_cascade",
+    "preset": "fresco",
+    "seed": 305,
+    "duration_sec": 300,
+    "kind": "piece"
+  },
+  {
+    "model": "supernova_orbit",
+    "preset": "odyssey",
+    "seed": 306,
+    "duration_sec": 300,
+    "kind": "piece"
+  },
+  {
+    "model": "chromatic_cascade",
+    "preset": "fresco",
+    "seed": 506,
+    "duration_sec": 600,
+    "kind": "piece"
+  },
+  {
+    "model": "matter_cycle",
+    "preset": "tides",
+    "seed": 507,
+    "duration_sec": 600,
+    "kind": "piece"
+  },
+  {
+    "model": "radial_burst",
+    "preset": "pulsar",
+    "seed": 508,
+    "duration_sec": 600,
+    "kind": "piece"
+  },
+  {
+    "model": "metro_rise",
+    "preset": "century",
+    "seed": 509,
+    "duration_sec": 600,
+    "kind": "piece"
+  },
+  {
+    "model": "text_ident",
+    "preset": "plz_ignore",
+    "seed": 1,
+    "duration_sec": 12,
+    "kind": "ident"
+  },
+  {
+    "model": "metro_rise",
+    "preset": "century",
+    "seed": 207,
+    "duration_sec": 300,
+    "kind": "piece"
+  },
+  {
+    "model": "metro_rise",
+    "preset": "century",
+    "seed": 307,
+    "duration_sec": 300,
+    "kind": "piece"
+  }
+]

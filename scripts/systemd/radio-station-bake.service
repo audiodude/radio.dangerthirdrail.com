@@ -1,0 +1,10 @@
+[Unit]
+Description=radio station weekly set bake
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/radio.env
+ExecStart=/usr/bin/env bash /opt/radio/scripts/bake/bake.sh
+Nice=10

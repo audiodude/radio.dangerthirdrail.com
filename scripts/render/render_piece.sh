@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # render_piece.sh <model> <preset> <seed> <duration_sec> <out_dir> [--kind piece|ident]
-# Renders a single vxstory model+preset to 720p60 mp4 with seed substitution.
+# Renders a single vxstory model+preset to a 60 fps mp4 (RENDER_RES, default
+# 1920x1080: the models' native size) with seed substitution.
 set -euo pipefail
 
 MODEL="${1:?usage: render_piece.sh <model> <preset> <seed> <duration_sec> <out_dir> [--kind piece|ident]}"
@@ -52,10 +53,11 @@ trap cleanup EXIT
 # Substitute seed into preset
 jq --argjson seed "$SEED" '.seed = $seed' "$PRESET_PATH" > "$TMP_PRESET"
 
-# Render at the models' native 1080p design space, downscale to 720p in the
-# encode. Do NOT shrink the project viewport (the old override.cfg approach):
-# that changes the design space and CROPS the composition rather than scaling
-# it — every model is composed in 1920x1080 coordinates.
+# Render at the models' native 1080p design space; RENDER_RES only changes the
+# encode (a smaller size is a Lanczos downscale, which doubles as supersampling
+# AA). Do NOT shrink the project viewport (the old override.cfg approach): that
+# changes the design space and CROPS the composition rather than scaling it —
+# every model is composed in 1920x1080 coordinates.
 echo "[render_piece] rendering $MODEL/$PRESET seed=$SEED duration=${DURATION}s -> $OUT_MP4"
 START_TIME="$(date +%s)"
 
@@ -75,10 +77,10 @@ echo "[render_piece] render done in ${ELAPSED}s, encoding mp4..."
 
 # Encode to a temp name and mv into place so a killed run can never leave a
 # half-written mp4 that the skip-if-exists check would mistake for complete.
-# Lanczos downscale 1080p -> 720p doubles as supersampling AA.
+RES="${RENDER_RES:-1920x1080}"
 ffmpeg -y -loglevel error \
     -i "$TMP_AVI" \
-    -vf "scale=1280:720:flags=lanczos" \
+    -vf "scale=${RES/x/:}:flags=lanczos" \
     -c:v libx264 -crf 18 -pix_fmt yuv420p \
     -r 60 -an \
     -f mp4 "${OUT_MP4}.tmp"

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Build a deterministic show plan: music timeline, video EDL, subtitle cues.
+"""Plan one station set: the whole library, cut into stretch VODs.
 
-Pure and stdlib-only. Durations are passed in as data (so the core is testable
-without media); the CLI wrapper fills them via ffprobe.
+Each VOD is one ident plus 2-3 songs over the visuals, with its burned-in
+titles and YouTube title/description. Pure and stdlib-only: durations come in
+as data (so the core is testable without media); the CLI fills them via
+ffprobe.
 """
 import json
 import math
@@ -10,61 +12,21 @@ import os
 import random
 import subprocess
 
+UNCUT_SHARE = 0.75   # share of stretches played as one unbroken piece
+MAX_SEG = 600.0      # longest any one piece stays on screen, in seconds
+TITLE_MAX = 100      # YouTube's title limit
+SONG_URL = "https://songs.travisbriggs.com/{slug}/"
+VISUALS_URL = "https://github.com/audiodude/vxstory"
+
 
 def title_from_path(path: str) -> str:
     base = os.path.splitext(os.path.basename(path))[0]
     return base.replace("-", " ").replace("_", " ").title()
 
 
-def shuffle(items: list, seed: int, no_repeat: bool = False) -> list:
-    rng = random.Random(seed)
-    out = list(items)
-    rng.shuffle(out)
-    if no_repeat:
-        for i in range(1, len(out)):
-            if out[i] == out[i - 1]:
-                # swap with the next differing element to break the run
-                for j in range(i + 1, len(out)):
-                    if out[j] != out[i - 1]:
-                        out[i], out[j] = out[j], out[i]
-                        break
-    return out
-
-
-def playlist(library: list, seed: int):
-    """Endless seeded shuffle: a fresh pass each time the library runs out, so a
-    show longer than the library still fills its target (no song twice in a row
-    across a pass seam)."""
-    rng = random.Random(f"music:{seed}")
-    prev = None
-    while True:
-        order = list(library)
-        rng.shuffle(order)
-        if len(order) > 1 and order[0] == prev:
-            order[0], order[-1] = order[-1], order[0]
-        yield from order
-        prev = order[-1]
-
-
-def build_music_timeline(ordered, target_dur: float) -> list[dict]:
-    tl = []
-    t = 0.0
-    for trk in ordered:
-        start = t
-        end = round(start + float(trk["dur"]), 3)
-        tl.append({"file": trk["file"], "title": trk["title"], "start": round(start, 3), "end": end})
-        t = end
-        if t >= target_dur:
-            break
-    return tl
-
-
-def song_boundaries(timeline: list[dict]) -> list[float]:
-    return [e["start"] for e in timeline[1:]]
-
-
-def build_subtitles(timeline: list[dict]) -> list[dict]:
-    return [{"text": e["title"], "start": e["start"], "end": e["end"]} for e in timeline]
+def render_name(piece: dict) -> str:
+    """A piece's on-screen credit: its sidecar `title`, else its model in Title Case."""
+    return piece.get("title") or piece["model"].replace("_", " ").title()
 
 
 def ffprobe_duration(path: str) -> float:
@@ -83,117 +45,61 @@ def ffprobe_has_audio(path: str) -> bool:
     return bool(out.stdout.strip())
 
 
-UNCUT_SHARE = 0.75   # share of ident-to-ident stretches played as one unbroken piece
-MAX_SEG = 600.0      # longest any one piece stays on screen, in seconds
-
-
-def build_edl(pieces, idents, boundaries, show_dur, dwell, straddle, rng,
-              prev_ident=None, uncut_share=UNCUT_SHARE, max_seg=MAX_SEG) -> list[dict]:
-    """rng picks each piece segment's in-point, so a piece that recurs through the
-    show doesn't always open on the same frames, and draws each transition's ident
-    by catalog weight. Idents always play from 0.
-
-    Idents are spaced at least two songs apart (the opening ident, `prev_ident`,
-    counts as one sitting before the first song), and never repeat the previous
-    ident. When no other ident is available, a `filler` ident plays even if it
-    repeats; with no filler either, the transition becomes a straight cut.
-
-    Each stretch between idents is drawn uncut (`uncut_share`) or cut. An uncut
-    stretch plays one piece long enough to cover it; with none long enough, or
-    the stretch longer than `max_seg`, it falls back to cut. A cut stretch starts
-    a new piece at every song boundary inside it, and mid-song wherever a piece
-    would otherwise outrun `max_seg`. Pieces rotate least-recently-used, and the
-    same piece never plays twice in a row, even across an ident.
-
-    `boundaries` and `show_dur` are music-only times. A silent ident straddles its
-    song boundary with music underneath; an ident with audio is a break that
-    sits between the two songs and delays the rest of the show by its duration.
-    The returned EDL is in show time (breaks included)."""
-    edl = []
-    queue = list(pieces)            # least recently used first
-    longest = max(p["dur"] for p in pieces)
-    last_src = None
-
-    def take(length):
-        """LRU piece covering `length`, not the piece just shown; None if none fits."""
-        nonlocal last_src
-        fits = [p for p in queue if p["dur"] >= length - 1e-6]
-        piece = next((p for p in fits if p["src"] != last_src), fits[0] if fits else None)
-        if piece is not None:
-            queue.remove(piece); queue.append(piece)
-            last_src = piece["src"]
-        return piece
-
-    def fill(t, end):
-        """Cover show time [t, end) with piece segments."""
-        if rng.random() < uncut_share and end - t <= max_seg + 1e-6:
-            piece = take(end - t)
-            if piece is not None:
-                edl.append(_piece_seg(piece, end - t, t, rng))
-                return
-        inner = [b + shift for b in boundaries if t + 1e-6 < b + shift < end - 1e-6]
-        for a, b in zip([t] + inner, inner + [end]):
-            while b - a > 1e-6:     # a song longer than every piece or max_seg cuts mid-song
-                step = min(b - a, longest, max_seg)
-                piece = take(step)
-                edl.append(_piece_seg(piece, step, a, rng))
-                a += step
-
-    t = 0.0
-    shift = 0.0                     # total break time inserted so far
-    last_k = -1                     # boundary index of the last ident; -1 = opening
-    while t < show_dur + shift - 1e-6:
-        k = next((k for k, b in enumerate(boundaries)
-                  if k >= last_k + 2 and b + shift >= t + dwell), None)
-        cut_at = None if k is None else boundaries[k] + shift
-        if cut_at is None or cut_at >= show_dur + shift:
-            fill(t, show_dur + shift)
-            break
-        eligible = ([i for i in idents if i["src"] != prev_ident]
-                    or [i for i in idents if i.get("filler")])
-        if not eligible:
-            fill(t, cut_at)
-            t, last_k = cut_at, k
-            continue
-        ident = rng.choices(eligible, weights=[float(i.get("weight", 1.0)) for i in eligible])[0]
-        prev_ident, last_k = ident["src"], k
-        if ident.get("audio"):
-            istart, iend = cut_at, cut_at + ident["dur"]
-        elif straddle:
-            istart, iend = cut_at - ident["dur"] / 2, cut_at + ident["dur"] / 2
-        else:
-            istart, iend = cut_at, cut_at + ident["dur"]
-        istart = max(istart, t)
-        fill(t, istart)
-        if ident.get("audio"):
-            shift += ident["dur"]
-        seg = {"kind": "ident", "src": ident["src"], "in": 0.0,
-               "out": round(min(ident["dur"], show_dur + shift - istart), 3),
-               "tl_start": round(istart, 3)}
-        if ident.get("audio"):
-            seg["audio"] = True
-        edl.append(seg)
-        t = iend
-    return edl
-
-
-def apply_breaks(timeline: list[dict], edl: list[dict]) -> list[dict]:
-    """Shift each song past the audio-ident breaks the EDL placed before it."""
-    breaks = [(s["tl_start"], s["out"]) for s in edl if s.get("audio")]
-    out, shift, bi = [], 0.0, 0
-    for song in timeline:
-        while bi < len(breaks) and breaks[bi][0] <= song["start"] + shift + 0.01:
-            shift += breaks[bi][1]; bi += 1
-        out.append({**song, "start": round(song["start"] + shift, 3),
-                    "end": round(song["end"] + shift, 3)})
+def stretches(songs: list, rng) -> list[list]:
+    """Consecutive groups of 2 or 3 songs, drawn at random; the tail is split so
+    no group is ever 1 or 4 songs. Needs at least 2 songs."""
+    if len(songs) < 2:
+        raise ValueError(f"a set needs at least 2 songs, got {len(songs)}")
+    out, i = [], 0
+    while i < len(songs):
+        left = len(songs) - i
+        k = left if left <= 3 else rng.choice((2, 3))
+        if left - k == 1:            # never strand one song
+            k = 5 - k
+        out.append(songs[i:i + k])
+        i += k
     return out
 
 
-def pick_opening_ident(idents: list[dict], rng) -> dict:
-    """Idents flagged `opening` in the catalog open the broadcast; with none
-    flagged, any ident may. Drawn by weight among the eligible."""
-    eligible = [i for i in idents if i.get("opening")] or idents
-    return rng.choices(eligible, weights=[float(i.get("weight", 1.0)) for i in eligible])[0]
+def pick_idents(n: int, idents: list[dict], rng) -> list[dict]:
+    """One ident per VOD, by weight. Never the same ident on consecutive VODs,
+    including last -> first around the loop, except a `filler`, which may repeat."""
+    if not idents:
+        raise ValueError("the catalog has no idents")
+
+    def draw(avoid):
+        pool = [i for i in idents if i.get("filler") or i["src"] not in avoid] or idents
+        return rng.choices(pool, weights=[float(i.get("weight", 1.0)) for i in pool])[0]
+
+    out = []
+    for k in range(n):
+        avoid = {out[-1]["src"]} if out else set()
+        if k == n - 1 and n > 1:
+            avoid.add(out[0]["src"])
+        out.append(draw(avoid))
+    return out
+
+
+class Rotation:
+    """Pieces least-recently-used first; never the piece just shown."""
+
+    def __init__(self, pieces):
+        self.queue = list(pieces)
+        self.last = None
+        self.longest = max(p["dur"] for p in pieces)
+
+    def take(self, length, avoid=()):
+        """LRU piece covering `length`, not the last one shown nor `avoid`;
+        None if no piece is long enough."""
+        fits = [p for p in self.queue if p["dur"] >= length - 1e-6]
+        if not fits:
+            return None
+        piece = next((p for p in fits if p["src"] != self.last and p["src"] not in avoid),
+                     next((p for p in fits if p["src"] != self.last), fits[0]))
+        self.queue.remove(piece)
+        self.queue.append(piece)
+        self.last = piece["src"]
+        return piece
 
 
 def _piece_seg(piece, length, tl_start, rng) -> dict:
@@ -201,6 +107,86 @@ def _piece_seg(piece, length, tl_start, rng) -> dict:
     start = math.floor(rng.uniform(0.0, slack) * 1000) / 1000   # floor: never past EOF
     return {"kind": "piece", "src": piece["src"], "in": start,
             "out": round(length, 3), "tl_start": round(tl_start, 3)}
+
+
+def build_visuals(span, boundaries, rot, rng, uncut_share=UNCUT_SHARE, max_seg=MAX_SEG,
+                  avoid_last=()):
+    """Piece segments covering VOD time [span[0], span[1]).
+
+    Uncut (`uncut_share`): one piece for the whole span, if the span is at most
+    `max_seg` and some piece is that long. Otherwise cut: a new piece at every
+    song boundary, and mid-song wherever a segment would outrun `max_seg` or
+    the longest piece. `avoid_last` keeps the final segment off those pieces
+    (the loop seam)."""
+    t, end = span
+    if end - t <= 1e-6:
+        return []
+    if rng.random() < uncut_share and end - t <= max_seg + 1e-6:
+        piece = rot.take(end - t, avoid_last)
+        if piece is not None:
+            return [_piece_seg(piece, end - t, t, rng)]
+    edges = [t] + [b for b in boundaries if t + 1e-6 < b < end - 1e-6] + [end]
+    cuts = []
+    for a, b in zip(edges, edges[1:]):
+        while b - a > 1e-6:
+            cuts.append((a, min(b - a, rot.longest, max_seg)))
+            a += cuts[-1][1]
+    segs = []
+    for i, (a, length) in enumerate(cuts):
+        piece = rot.take(length, avoid_last if i == len(cuts) - 1 else ())
+        segs.append(_piece_seg(piece, length, a, rng))
+    return segs
+
+
+def vod_title(songs: list[str], renders: list[str], limit=TITLE_MAX) -> str:
+    """`Song A - Song B (Render 1, Render 2)`. Every song title stays; the render
+    list is best effort, truncated with `...` or dropped. Songs alone over the
+    limit truncate the last song."""
+    base = " - ".join(songs)
+    if len(base) > limit:
+        return base[:limit - 3].rstrip() + "..."
+    room = limit - len(base) - 3                 # " (" + ")"
+    full = ", ".join(renders)
+    if not renders or room < 4:                  # not even "X..."
+        return base
+    inner = full if len(full) <= room else full[:room - 3].rstrip(" ,") + "..."
+    return f"{base} ({inner})"
+
+
+def vod_description(blurb: str, songs: list[dict], renders: list[str]) -> str:
+    lines = [blurb.strip(), ""] if blurb.strip() else []
+    lines.append("Songs:")
+    lines += [f"{s['title']} - {SONG_URL.format(slug=s['slug'])}" for s in songs]
+    lines += ["", f"Visuals: {', '.join(renders)} (made with vxstory: {VISUALS_URL})"]
+    return "\n".join(lines)
+
+
+def _youtube_safe(text: str) -> str:
+    return text.replace("<", "").replace(">", "")     # YouTube rejects angle brackets
+
+
+def build_vod(songs, ident, rot, rng, avoid_last=()) -> dict:
+    """One VOD: an audio ident is pre-roll (music starts after it); a silent
+    ident plays over the start of song 1. Times are VOD-relative."""
+    pre = ident["dur"] if ident.get("audio") else 0.0
+    music, t = [], pre
+    for s in songs:
+        music.append({"file": s["file"], "title": s["title"], "slug": s["slug"],
+                      "start": round(t, 3), "end": round(t + float(s["dur"]), 3)})
+        t += float(s["dur"])
+    end = music[-1]["end"]
+    vis_start = min(ident["dur"], end)
+    ident_seg = {"kind": "ident", "src": ident["src"], "in": 0.0,
+                 "out": round(vis_start, 3), "tl_start": 0.0}
+    if ident.get("audio"):
+        ident_seg["audio"] = True
+    edl = [ident_seg] + build_visuals((vis_start, end), [m["start"] for m in music[1:]],
+                                      rot, rng, avoid_last=avoid_last)
+    return {"dur": round(end, 3), "ident": {"src": ident["src"], "dur": ident["dur"],
+                                            "audio": bool(ident.get("audio"))},
+            "music": music, "edl": edl,
+            "subtitles": [{"text": m["title"], "start": m["start"], "end": m["end"]}
+                          for m in music]}
 
 
 def _sha(parts) -> str:
@@ -211,57 +197,44 @@ def _sha(parts) -> str:
     return h.hexdigest()[:16]
 
 
-def build_plan(catalog: dict, library: list[dict], config: dict) -> dict:
+def build_set(catalog: dict, library: list[dict], config: dict) -> dict:
+    """`config`: seed, swap_at, fps, resolution, blurb (optional),
+    uncut_share (optional)."""
     seed = int(config["seed"])
-    show_dur = float(config["show_dur_sec"])
-    dwell = float(config["dwell_sec"])
-    straddle = bool(config.get("straddle", True))
+    blurb = config.get("blurb", "")
+    uncut_share = float(config.get("uncut_share", UNCUT_SHARE))
 
-    # DWELL constraint: a piece segment runs dwell + the rest of the current song,
-    # so it must fit within the shortest piece source. (Longer stretches between
-    # idents hard-cut piece to piece at song boundaries.) Songs too long to satisfy
-    # that are dropped from the show rather than failing the bake — the catalog's
-    # piece length is the hard limit, and one 9-minute track shouldn't block a
-    # night's stream. (Lift the cap by rendering longer pieces.)
-    min_piece = min((float(p["dur"]) for p in catalog["pieces"]), default=0.0)
-    song_cap = min_piece - dwell
-    excluded = [t["file"] for t in library if float(t["dur"]) > song_cap + 1e-6]
-    library = [t for t in library if float(t["dur"]) <= song_cap + 1e-6]
-    if not library:
-        raise ValueError(
-            f"no songs fit the DWELL constraint: dwell({dwell}) + every song "
-            f"> min_piece({min_piece:.1f}). Lower dwell_sec or use longer pieces.")
+    songs = sorted(library, key=lambda s: s["file"])
+    random.Random(f"music:{seed}").shuffle(songs)
+    groups = stretches(songs, random.Random(f"stretch:{seed}"))
+    idents = pick_idents(len(groups), catalog["idents"], random.Random(f"ident:{seed}"))
 
-    # Music: endless seeded shuffle, timeline built to >= show_dur.
-    timeline = build_music_timeline(playlist(library, seed), target_dur=show_dur)
-    music_dur = timeline[-1]["end"] if timeline else 0.0   # exact end of the audio
-    boundaries = song_boundaries(timeline)
+    pieces = sorted(catalog["pieces"], key=lambda p: p["src"])
+    random.Random(f"pieces:{seed}").shuffle(pieces)
+    rot = Rotation(pieces)
+    rng = random.Random(f"edl:{seed}")
+    names = {p["src"]: render_name(p) for p in pieces}
 
-    pieces = shuffle([{"src": p["file"], "dur": float(p["dur"])} for p in catalog["pieces"]],
-                     seed=seed + 1, no_repeat=True)
-    idents = [{"src": i["file"], "dur": float(i["dur"]), "weight": float(i.get("weight", 1.0)),
-               "audio": bool(i.get("audio")), "opening": bool(i.get("opening")),
-               "filler": bool(i.get("filler"))}
-              for i in catalog["idents"]]
-    opening_ident = pick_opening_ident(idents, random.Random(f"opening:{seed}"))
-    edl = build_edl(pieces, idents, boundaries, music_dur, dwell, straddle,
-                    rng=random.Random(f"edl:{seed}"), prev_ident=opening_ident["src"])
-    # Audio-ident breaks push later songs back; the show runs long by their total.
-    timeline = apply_breaks(timeline, edl)
-    real_dur = timeline[-1]["end"] if timeline else 0.0
+    vods = []
+    for k, (group, ident) in enumerate(zip(groups, idents)):
+        first = vods[0]["edl"][1:2] if vods else []
+        avoid = {first[0]["src"]} if k == len(groups) - 1 and first else ()
+        v = build_vod(group, ident, rot, rng, avoid_last=avoid)
+        renders = list(dict.fromkeys(names[s["src"]] for s in v["edl"] if s["kind"] == "piece"))
+        vods.append({"index": k, "file": f"vod-{k:03d}.mp4",
+                     "title": _youtube_safe(vod_title([m["title"] for m in v["music"]], renders)),
+                     "description": _youtube_safe(vod_description(blurb, v["music"], renders)),
+                     **v})
 
     return {
         "seed": seed,
+        "swap_at": config["swap_at"],
         "fps": int(config["fps"]),
         "resolution": str(config["resolution"]),
-        "show_dur_sec": round(real_dur, 3),
-        "music": timeline,
-        "edl": edl,
-        "opening_ident": {"src": opening_ident["src"], "dur": opening_ident["dur"]},
-        "subtitles": build_subtitles(timeline),
-        "excluded_songs": excluded,
-        "catalog_sha": _sha(sorted(p["file"] for p in catalog["pieces"]) +
-                            sorted(i["file"] for i in catalog["idents"])),
+        "loop_sec": round(sum(v["dur"] for v in vods), 3),
+        "vods": vods,
+        "catalog_sha": _sha(sorted(p["src"] for p in catalog["pieces"]) +
+                            sorted(i["src"] for i in catalog["idents"])),
         "library_sha": _sha(sorted(t["file"] for t in library)),
     }
 
@@ -275,9 +248,9 @@ def resolve_media(entry_file: str, catalog_dir: str) -> str:
 
 
 def _load_catalog(path: str) -> dict:
-    """Idents may carry `weight` (relative draw odds, default 1), `opening`
-    (eligible to open the broadcast) and `filler` (plays when no other ident is
-    available, even back to back). Whether an ident has audio is probed."""
+    """Pieces keep `model` and an optional `title` (their credit). Idents may
+    carry `weight` (relative draw odds, default 1) and `filler` (may open two
+    VODs in a row). Whether an ident has audio is probed."""
     with open(path) as f:
         data = json.load(f)
     here = os.path.dirname(os.path.abspath(path))
@@ -287,13 +260,17 @@ def _load_catalog(path: str) -> dict:
         if key is None:
             continue
         f_path = resolve_media(e["file"], here)
-        item = {"file": f_path, "dur": ffprobe_duration(f_path)}
-        if key == "idents":
+        item = {"src": f_path, "dur": ffprobe_duration(f_path)}
+        if key == "pieces":
+            item.update(model=e.get("model", os.path.splitext(os.path.basename(f_path))[0]))
+            if e.get("title"):
+                item["title"] = e["title"]
+        else:
             weight = float(e.get("weight", 1.0))
             if weight <= 0:
                 raise ValueError(f"ident {e['file']}: weight must be > 0, got {weight}")
-            item.update(weight=weight, opening=bool(e.get("opening", False)),
-                        filler=bool(e.get("filler", False)), audio=ffprobe_has_audio(f_path))
+            item.update(weight=weight, filler=bool(e.get("filler", False)),
+                        audio=ffprobe_has_audio(f_path))
         out[key].append(item)
     return out
 
@@ -302,9 +279,17 @@ DENYLIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "song_denyli
 
 
 def load_denylist(path: str) -> set[str]:
-    """Song filenames (one per line, `#` comments) never planned into a show."""
+    """Song filenames (one per line, `#` comments) never planned into a set."""
     with open(path) as f:
         return {line.split("#", 1)[0].strip() for line in f} - {""}
+
+
+def load_library(library_dir: str, denied: set[str]) -> list[dict]:
+    import glob
+    paths = sorted(glob.glob(os.path.join(library_dir, "*.mp3")))
+    return [{"file": p, "title": title_from_path(p), "dur": ffprobe_duration(p),
+             "slug": os.path.splitext(os.path.basename(p))[0]}
+            for p in paths if os.path.basename(p) not in denied]
 
 
 def main():
@@ -313,36 +298,24 @@ def main():
     ap.add_argument("--catalog", required=True)
     ap.add_argument("--library-dir", required=True)
     ap.add_argument("--seed", type=int, required=True)
-    ap.add_argument("--show-dur", type=float, required=True)
-    ap.add_argument("--dwell", type=float, default=600.0)
+    ap.add_argument("--swap-at", required=True, help="ISO 8601 time the set goes on air")
     ap.add_argument("--fps", type=int, default=60)
-    ap.add_argument("--resolution", default="1280x720")
-    ap.add_argument("--straddle", action="store_true", default=True)
+    ap.add_argument("--resolution", default="1920x1080")
+    ap.add_argument("--blurb-file", default="", help="text opening every VOD description")
     ap.add_argument("--denylist", default=DENYLIST)
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
-    import glob
-    catalog = _load_catalog(a.catalog)
     denied = load_denylist(a.denylist)
-    paths = sorted(glob.glob(os.path.join(a.library_dir, "*.mp3")))
-    skipped = [p for p in paths if os.path.basename(p) in denied]
-    library = [{"file": p, "title": title_from_path(p), "dur": ffprobe_duration(p)}
-               for p in paths if os.path.basename(p) not in denied]
-    if skipped:
-        print(f"[plan] denylisted {len(skipped)} song(s): "
-              f"{', '.join(os.path.basename(p) for p in skipped)}")
-    cfg = {"seed": a.seed, "show_dur_sec": a.show_dur, "dwell_sec": a.dwell,
-           "fps": a.fps, "resolution": a.resolution, "straddle": a.straddle}
-    plan_doc = build_plan(catalog, library, cfg)
+    library = load_library(a.library_dir, denied)
+    blurb = open(a.blurb_file).read() if a.blurb_file and os.path.exists(a.blurb_file) else ""
+    cfg = {"seed": a.seed, "swap_at": a.swap_at, "fps": a.fps,
+           "resolution": a.resolution, "blurb": blurb}
+    plan_doc = build_set(_load_catalog(a.catalog), library, cfg)
     with open(a.out, "w") as f:
         json.dump(plan_doc, f, indent=2)
-    dropped = plan_doc["excluded_songs"]
-    if dropped:
-        print(f"[plan] excluded {len(dropped)} song(s) longer than the piece/dwell "
-              f"budget: {', '.join(os.path.basename(d) for d in dropped)}")
-    print(f"[plan] wrote {a.out}: {len(plan_doc['edl'])} edl segs, "
-          f"{len(plan_doc['music'])} songs, show_dur={plan_doc['show_dur_sec']:.1f}s")
+    print(f"[plan] wrote {a.out}: {len(plan_doc['vods'])} VODs, {len(library)} songs, "
+          f"loop={plan_doc['loop_sec']:.0f}s")
 
 
 if __name__ == "__main__":

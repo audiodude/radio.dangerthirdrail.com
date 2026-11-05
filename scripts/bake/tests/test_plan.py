@@ -1,294 +1,170 @@
 import json
-import os, random, sys
+import os
+import random
+import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import plan
+
+
+def _song(i, dur=200.0):
+    return {"file": f"/m/s{i:03d}.mp3", "title": f"S{i}", "slug": f"s{i:03d}", "dur": dur}
+
+def _piece(src, dur, model="fluid_swirl", **kw):
+    return {"src": src, "dur": dur, "model": model, **kw}
+
+IDENTS = [{"src": "loud_a.mp4", "dur": 17.0, "weight": 1.0, "audio": True},
+          {"src": "loud_b.mp4", "dur": 20.0, "weight": 1.0, "audio": True},
+          {"src": "loud_c.mp4", "dur": 16.0, "weight": 1.0, "audio": True},
+          {"src": "filler.mp4", "dur": 12.0, "weight": 6.0, "filler": True}]
+
+def _set(library, pieces, idents=IDENTS, seed=20261113, **cfg):
+    return plan.build_set({"pieces": pieces, "idents": idents}, library,
+                          {"seed": seed, "swap_at": "2026-11-13T06:00:00-08:00",
+                           "fps": 60, "resolution": "1920x1080", **cfg})
+
+def _pieces_in_order(p):
+    return [s["src"] for v in p["vods"] for s in v["edl"] if s["kind"] == "piece"]
+
 
 def test_title_from_path():
     assert plan.title_from_path("/x/ele-1005.mp3") == "Ele 1005"
     assert plan.title_from_path("never_havin_kids.mp3") == "Never Havin Kids"
 
-def test_shuffle_deterministic_and_total():
-    a = plan.shuffle(list(range(20)), seed=7)
-    b = plan.shuffle(list(range(20)), seed=7)
-    c = plan.shuffle(list(range(20)), seed=8)
-    assert a == b and a != c
-    assert sorted(a) == list(range(20))  # permutation, nothing lost
-
-def test_shuffle_no_repeat_join():
-    # no element equal to its predecessor (best-effort across a single shuffle)
-    out = plan.shuffle(["a", "b", "c", "d"], seed=3, no_repeat=True)
-    assert all(out[i] != out[i-1] for i in range(1, len(out)))
-
-def test_music_timeline_fills_target():
-    ordered = [{"file": f"{i}.mp3", "title": str(i), "dur": 100.0} for i in range(10)]
-    tl = plan.build_music_timeline(ordered, target_dur=250.0)
-    assert len(tl) == 3                      # 100+100+100 >= 250, stops at 3
-    assert tl[0]["start"] == 0.0 and tl[0]["end"] == 100.0
-    assert tl[1]["start"] == 100.0 and tl[2]["end"] == 300.0
-
-def test_song_boundaries():
-    tl = [{"start": 0.0, "end": 100.0}, {"start": 100.0, "end": 250.0}, {"start": 250.0, "end": 400.0}]
-    assert plan.song_boundaries(tl) == [100.0, 250.0]   # boundaries are song STARTS, excluding 0
-
-def test_subtitles_one_per_song():
-    tl = [{"title": "A", "start": 0.0, "end": 100.0}, {"title": "B", "start": 100.0, "end": 250.0}]
-    subs = plan.build_subtitles(tl)
-    assert subs == [{"text": "A", "start": 0.0, "end": 100.0}, {"text": "B", "start": 100.0, "end": 250.0}]
+def test_render_name_prefers_sidecar_title():
+    assert plan.render_name({"model": "supernova_orbit"}) == "Supernova Orbit"
+    assert plan.render_name({"model": "hydra", "title": "Radical Rainbow"}) == "Radical Rainbow"
 
 
-def _piece(src, dur): return {"src": src, "dur": dur}
+def test_stretches_are_two_or_three_songs_and_keep_every_song_in_order():
+    for n in range(2, 40):
+        for seed in range(5):
+            groups = plan.stretches(list(range(n)), random.Random(seed))
+            assert [x for g in groups for x in g] == list(range(n))
+            assert all(len(g) in (2, 3) for g in groups), (n, seed, groups)
 
-def test_edl_cuts_at_first_boundary_after_dwell():
-    pieces = [_piece("p0.mp4", 1200.0), _piece("p1.mp4", 1200.0)]
-    idents = [_piece("id.mp4", 12.0)]
-    boundaries = [180.0, 360.0, 540.0, 720.0]   # songs every 180s
-    edl = plan.build_edl(pieces, idents, boundaries, show_dur=2000.0, dwell=300.0, straddle=True,
-                         rng=random.Random(0), uncut_share=1.0)
-    # first piece: dwell 300 -> first boundary >=300 is 360; ident straddles 360
-    assert edl[0]["kind"] == "piece" and edl[0]["tl_start"] == 0.0
-    assert edl[0]["out"] == 354.0                 # 360 - 12/2 - 0
-    assert edl[1]["kind"] == "ident" and edl[1]["tl_start"] == 354.0 and edl[1]["out"] == 12.0
-    assert edl[2]["kind"] == "piece" and edl[2]["tl_start"] == 366.0   # 360 + 6
+def test_stretches_need_two_songs():
+    try:
+        plan.stretches([1], random.Random(0))
+    except ValueError:
+        pass
+    else:
+        assert False
 
-def test_edl_final_piece_runs_to_show_end_without_ident():
-    pieces = [_piece("p0.mp4", 5000.0)]
-    idents = [_piece("id.mp4", 12.0)]
-    edl = plan.build_edl(pieces, idents, boundaries=[], show_dur=400.0, dwell=300.0, straddle=True,
-                         rng=random.Random(0))
-    assert len(edl) == 1 and edl[0]["kind"] == "piece"
-    assert edl[0]["tl_start"] == 0.0 and edl[0]["out"] == 400.0
 
-def test_edl_covers_full_show():
-    pieces = [_piece(f"p{i}.mp4", 1200.0) for i in range(5)]
-    idents = [_piece("id.mp4", 12.0)]
-    boundaries = [i * 180.0 for i in range(1, 80)]
-    edl = plan.build_edl(pieces, idents, boundaries, show_dur=3600.0, dwell=600.0, straddle=True,
-                         rng=random.Random(0))
-    last = edl[-1]
-    assert abs((last["tl_start"] + last["out"]) - 3600.0) < 0.05    # timeline reaches show end
-    # piece segments stay inside their source, and don't all open on frame 0
-    for seg in edl:
-        if seg["kind"] == "piece":
-            assert seg["in"] >= 0.0 and seg["in"] + seg["out"] <= 1200.0 + 1e-6
-    assert any(seg["in"] > 0.0 for seg in edl if seg["kind"] == "piece")
+def test_idents_never_repeat_back_to_back_except_filler_even_across_the_seam():
+    for seed in range(200):
+        out = [i["src"] for i in plan.pick_idents(30, IDENTS, random.Random(seed))]
+        ring = list(zip(out, out[1:] + out[:1]))
+        assert all(a != b or a == "filler.mp4" for a, b in ring), (seed, out)
 
-def test_edl_audio_ident_is_a_break_between_songs():
-    pieces = [_piece(f"p{i}.mp4", 1200.0) for i in range(3)]
-    idents = [{"src": "loud.mp4", "dur": 20.0, "audio": True},
-              {"src": "loud2.mp4", "dur": 20.0, "weight": 1e-9, "audio": True}]
-    boundaries = [180.0, 360.0, 540.0, 720.0, 900.0]
-    edl = plan.build_edl(pieces, idents, boundaries, show_dur=1000.0, dwell=300.0,
-                         straddle=True, rng=random.Random(0), uncut_share=1.0)
-    # cut at 360: piece runs to the boundary, ident fills [360, 380], no straddle
-    assert edl[0]["out"] == 360.0
-    assert edl[1] == {"kind": "ident", "src": "loud.mp4", "in": 0.0, "out": 20.0,
-                      "tl_start": 360.0, "audio": True}
-    assert edl[2]["tl_start"] == 380.0
-    # next cut: music boundary 720 is now at 740 in show time
-    assert edl[3]["tl_start"] == 740.0 and edl[3]["audio"]
-    last = edl[-1]
-    assert abs(last["tl_start"] + last["out"] - 1040.0) < 0.05   # show grew by both breaks
+def test_ident_weights_set_draw_odds_and_filler_may_repeat():
+    out = [i["src"] for i in plan.pick_idents(9000, IDENTS, random.Random(1))]
+    share = out.count("filler.mp4") / len(out)
+    assert 0.55 < share < 0.72                    # 6 of 9 shares, minus no-repeat losses
+    assert any(a == b == "filler.mp4" for a, b in zip(out, out[1:]))
 
-    timeline = [{"start": float(s), "end": float(s + 180)} for s in range(0, 1000, 180)]
-    shifted = plan.apply_breaks(timeline, edl)
-    assert [(s["start"], s["end"]) for s in shifted[:5]] == [
-        (0.0, 180.0), (180.0, 360.0), (380.0, 560.0), (560.0, 740.0), (760.0, 940.0)]
 
-def test_edl_silent_ident_still_straddles_alongside_audio_idents():
-    pieces = [_piece("p0.mp4", 1200.0), _piece("p1.mp4", 1200.0)]
-    idents = [{"src": "quiet.mp4", "dur": 12.0, "weight": 1.0},
-              {"src": "loud.mp4", "dur": 20.0, "weight": 1e-9, "audio": True}]
-    edl = plan.build_edl(pieces, idents, [180.0, 360.0, 540.0], show_dur=600.0, dwell=300.0,
-                         straddle=True, rng=random.Random(0), uncut_share=1.0)
-    assert edl[1]["src"] == "quiet.mp4" and edl[1]["tl_start"] == 354.0 and "audio" not in edl[1]
+def test_set_plays_every_song_exactly_once():
+    lib = [_song(i, 120.0 + i) for i in range(41)]
+    p = _set(lib, [_piece(f"p{i}.mp4", 600.0) for i in range(4)])
+    files = [m["file"] for v in p["vods"] for m in v["music"]]
+    assert sorted(files) == sorted(s["file"] for s in lib)
+    assert all(len(v["music"]) in (2, 3) for v in p["vods"])
+    assert [v["file"] for v in p["vods"]] == [f"vod-{k:03d}.mp4" for k in range(len(p["vods"]))]
 
-def test_stretches_mix_uncut_long_pieces_and_cuts_at_song_boundaries():
-    # songs alternate 150/250 s, so a two-song stretch (~400 s) outruns the 300s
-    # pieces: an uncut stretch has to take a 600 s piece
-    pieces = [_piece(f"s{i}.mp4", 300.0) for i in range(4)] + \
-             [_piece(f"L{i}.mp4", 600.0) for i in range(2)]
-    boundaries, b = [], 0.0
-    for i in range(400):
-        b += 150.0 if i % 2 else 250.0
-        boundaries.append(b)
-    edl = plan.build_edl(pieces, [_piece("a.mp4", 12.0), _piece("b.mp4", 12.0)], boundaries,
-                         show_dur=boundaries[-1], dwell=30.0, straddle=True,
-                         rng=random.Random(3))
-    runs, cur = [], []
-    for seg in edl:
-        if seg["kind"] == "ident":
-            runs.append(cur); cur = []
-        else:
-            cur.append(seg)
-    runs = runs[1:]                                   # first stretch follows the opening
-    uncut = [r for r in runs if len(r) == 1]
-    assert all(r[0]["src"].startswith("L") for r in uncut)
-    assert all(len(r) == 2 and r[1]["tl_start"] in boundaries for r in runs if len(r) != 1)
-    assert 0.70 < len(uncut) / len(runs) < 0.80
-    srcs = [s["src"] for s in edl if s["kind"] == "piece"]
-    assert all(x != y for x, y in zip(srcs, srcs[1:]))
-    for seg in edl:
-        if seg["kind"] == "piece":
-            assert seg["in"] + seg["out"] <= (600.0 if seg["src"].startswith("L") else 300.0) + 1e-6
+def test_set_is_deterministic_per_seed():
+    lib = [_song(i) for i in range(20)]
+    pieces = [_piece(f"p{i}.mp4", 600.0) for i in range(4)]
+    a, b, c = _set(lib, pieces), _set(lib, pieces), _set(lib, pieces, seed=20261120)
+    assert json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
+    assert a["vods"] != c["vods"]
 
-def test_uncut_stretch_falls_back_to_cut_when_no_piece_is_long_enough():
-    pieces = [_piece("p0.mp4", 300.0), _piece("p1.mp4", 300.0)]
-    edl = plan.build_edl(pieces, [_piece("a.mp4", 12.0), _piece("b.mp4", 12.0)],
-                         [i * 250.0 for i in range(1, 40)], show_dur=9750.0, dwell=30.0,
-                         straddle=True, rng=random.Random(0), uncut_share=1.0)
-    kinds = [s["kind"] for s in edl]
-    assert "piece" in [b for a, b in zip(kinds, kinds[1:]) if a == "piece"]   # cuts happened
+
+def test_audio_ident_is_preroll_and_silent_ident_overlays_song_one():
+    lib = [_song(0, 100.0), _song(1, 100.0)]
+    pieces = [_piece("p0.mp4", 600.0), _piece("p1.mp4", 600.0)]
+    loud = _set(lib, pieces, idents=[IDENTS[0]])["vods"][0]
+    assert loud["edl"][0] == {"kind": "ident", "src": "loud_a.mp4", "in": 0.0, "out": 17.0,
+                              "tl_start": 0.0, "audio": True}
+    assert loud["music"][0]["start"] == 17.0 and loud["dur"] == 217.0
+    assert loud["subtitles"][0]["start"] == 17.0
+    quiet = _set(lib, pieces, idents=[IDENTS[3]])["vods"][0]
+    assert quiet["music"][0]["start"] == 0.0 and quiet["dur"] == 200.0
+    assert quiet["edl"][0]["out"] == 12.0 and "audio" not in quiet["edl"][0]
+    assert quiet["edl"][1]["tl_start"] == 12.0          # visuals take over after it
+
+
+def test_visuals_cover_each_vod_contiguously():
+    lib = [_song(i, 60.0 + 37 * (i % 7)) for i in range(60)]
+    p = _set(lib, [_piece(f"s{i}.mp4", 300.0) for i in range(6)] +
+             [_piece(f"L{i}.mp4", 600.0) for i in range(3)])
+    for v in p["vods"]:
+        t = 0.0
+        for seg in v["edl"]:
+            assert abs(seg["tl_start"] - t) < 0.01
+            assert seg["in"] >= 0.0
+            t = seg["tl_start"] + seg["out"]
+        assert abs(t - v["dur"]) < 0.01
 
 def test_no_piece_stays_on_screen_longer_than_max_seg():
-    # 1200 s pieces could cover every stretch uncut; songs alternate 400/900 s, so
-    # stretches outrun the cap and the 900 s songs must also cut mid-song
-    pieces = [_piece(f"p{i}.mp4", 1200.0) for i in range(3)]
-    boundaries, b = [], 0.0
-    for i in range(60):
-        b += 900.0 if i % 2 else 400.0
-        boundaries.append(b)
-    edl = plan.build_edl(pieces, [_piece("a.mp4", 12.0), _piece("b.mp4", 12.0)], boundaries,
-                         show_dur=boundaries[-1], dwell=30.0, straddle=True,
-                         rng=random.Random(0), uncut_share=1.0)
-    segs = [s for s in edl if s["kind"] == "piece"]
+    # 1200 s pieces could cover anything; 3 x 290 s stretches are over the cap,
+    # and a 700 s song must cut mid-song
+    lib = [_song(i, 290.0) for i in range(30)] + [_song(99, 700.0)]
+    p = _set(lib, [_piece(f"p{i}.mp4", 1200.0) for i in range(3)], uncut_share=1.0)
+    segs = [s for v in p["vods"] for s in v["edl"] if s["kind"] == "piece"]
     assert max(s["out"] for s in segs) <= 600.0 + 1e-6
-    assert all(x["src"] != y["src"] for x, y in zip(segs, segs[1:]))
-    edges = [0.0] + boundaries                # ident straddles shift starts by <= 6 s
-    assert any(min(abs(s["tl_start"] - e) for e in edges) > 6.0 for s in segs)  # mid-song cut
-    last = edl[-1]
-    assert abs(last["tl_start"] + last["out"] - boundaries[-1]) < 0.05
+    long_vod = next(v for v in p["vods"] if any(m["file"] == "/m/s099.mp3" for m in v["music"]))
+    song = next(m for m in long_vod["music"] if m["file"] == "/m/s099.mp3")
+    inside = [s for s in long_vod["edl"] if song["start"] + 1 < s["tl_start"] < song["end"] - 1]
+    assert inside                                    # a cut inside the 700 s song
 
-def test_ident_weights_set_draw_odds():
-    # the previous ident is excluded, so after "b" the draw is a:c at 3:1
-    pieces = [_piece("p0.mp4", 1200.0), _piece("p1.mp4", 1200.0)]
-    idents = [{"src": "a.mp4", "dur": 12.0, "weight": 3.0},
-              {"src": "b.mp4", "dur": 12.0, "weight": 1.0},
-              {"src": "c.mp4", "dur": 12.0, "weight": 1.0}]
-    edl = plan.build_edl(pieces, idents, [i * 100.0 for i in range(1, 8001)], show_dur=800000.0,
-                         dwell=50.0, straddle=True, rng=random.Random(5))
-    picks = [s["src"] for s in edl if s["kind"] == "ident"]
-    after_b = [nxt for prev, nxt in zip(picks, picks[1:]) if prev == "b.mp4"]
-    share = after_b.count("a.mp4") / len(after_b)
-    assert len(after_b) > 500 and 0.70 < share < 0.80
+def test_pieces_never_repeat_across_any_boundary_including_the_loop_seam():
+    lib = [_song(i, 90.0 + 13 * (i % 9)) for i in range(80)]
+    for seed in range(20261101, 20261131):
+        p = _set(lib, [_piece(f"p{i}.mp4", 600.0) for i in range(3)], seed=seed)
+        srcs = _pieces_in_order(p)
+        assert all(a != b for a, b in zip(srcs, srcs[1:] + srcs[:1])), seed
 
-def test_idents_two_songs_apart_and_never_repeat():
-    pieces = [_piece("p0.mp4", 1200.0), _piece("p1.mp4", 1200.0)]
-    idents = [{"src": "a.mp4", "dur": 12.0, "weight": 1000.0},
-              {"src": "b.mp4", "dur": 12.0, "weight": 1.0}]
-    boundaries = [i * 100.0 for i in range(1, 200)]
-    edl = plan.build_edl(pieces, idents, boundaries, show_dur=20000.0, dwell=0.0,
-                         straddle=True, rng=random.Random(1), prev_ident="a.mp4")
-    cuts = [round(s["tl_start"] + 6.0) for s in edl if s["kind"] == "ident"]
-    srcs = [s["src"] for s in edl if s["kind"] == "ident"]
-    # opening ident sits before song 1, so the first may follow song 2 at the earliest
-    assert cuts[0] == 200 and all(b - a == 200 for a, b in zip(cuts, cuts[1:]))
-    assert srcs[0] == "b.mp4" and all(x != y for x, y in zip(srcs, srcs[1:]))
+def test_most_stretches_play_one_piece_when_they_can():
+    lib = [_song(i, 150.0) for i in range(300)]
+    p = _set(lib, [_piece(f"p{i}.mp4", 600.0) for i in range(4)])
+    uncut = sum(1 for v in p["vods"] if len(v["edl"]) == 2)
+    assert 0.65 < uncut / len(p["vods"]) < 0.85
 
-def test_lone_ident_never_repeats_transitions_become_cuts():
-    pieces = [_piece("p0.mp4", 1200.0), _piece("p1.mp4", 1200.0)]
-    edl = plan.build_edl(pieces, [_piece("id.mp4", 12.0)], [i * 100.0 for i in range(1, 30)],
-                         show_dur=3000.0, dwell=0.0, straddle=True, rng=random.Random(0))
-    assert [s["kind"] for s in edl].count("ident") == 1
-    last = edl[-1]
-    assert abs(last["tl_start"] + last["out"] - 3000.0) < 0.05
-
-def test_filler_plays_when_no_other_ident_is_available():
-    pieces = [_piece("p0.mp4", 1200.0), _piece("p1.mp4", 1200.0)]
-    idents = [{"src": "real.mp4", "dur": 12.0},
-              {"src": "fill.mp4", "dur": 12.0, "weight": 1e-9, "filler": True}]
-    edl = plan.build_edl(pieces, idents, [i * 100.0 for i in range(1, 30)], show_dur=3000.0,
-                         dwell=0.0, straddle=True, rng=random.Random(0), prev_ident="real.mp4")
-    srcs = [s["src"] for s in edl if s["kind"] == "ident"]
-    # real can't follow the opening real; fill can't follow itself unless nothing else is left
-    assert srcs[:3] == ["fill.mp4", "real.mp4", "fill.mp4"]
-    assert all(a != b for a, b in zip(srcs, srcs[1:]))
-    lone = plan.build_edl(pieces, [{"src": "fill.mp4", "dur": 12.0, "filler": True}],
-                          [i * 100.0 for i in range(1, 30)], show_dur=3000.0, dwell=0.0,
-                          straddle=True, rng=random.Random(0))
-    assert [s["kind"] for s in lone].count("ident") == 14   # every 2nd boundary, repeating
-
-def test_long_stretch_between_idents_hard_cuts_at_song_boundaries():
-    # 250 s songs, 300 s pieces: two songs between idents can't fit one piece
-    pieces = [_piece(f"p{i}.mp4", 300.0) for i in range(3)]
-    idents = [_piece("a.mp4", 12.0), _piece("b.mp4", 12.0)]
-    boundaries = [i * 250.0 for i in range(1, 40)]
-    edl = plan.build_edl(pieces, idents, boundaries, show_dur=10000.0, dwell=30.0,
-                         straddle=True, rng=random.Random(2), prev_ident="a.mp4")
-    for prev, seg in zip(edl, edl[1:]):
-        assert abs(prev["tl_start"] + prev["out"] - seg["tl_start"]) < 0.01   # gapless
-        if prev["kind"] == seg["kind"] == "piece":                          # hard cut
-            assert seg["tl_start"] % 250.0 == 0.0 and seg["src"] != prev["src"]
-    for seg in edl:
-        if seg["kind"] == "piece":
-            assert seg["in"] + seg["out"] <= 300.0 + 1e-6
-    cuts = [s["tl_start"] + 6.0 for s in edl if s["kind"] == "ident"]
-    assert cuts[0] == 500.0 and all(b - a >= 500.0 for a, b in zip(cuts, cuts[1:]))
-
-def test_opening_ident_is_drawn_from_flagged_idents_only():
-    idents = [{"src": "test.mp4", "dur": 12.0, "weight": 1000.0},
-              {"src": "real.mp4", "dur": 21.9, "weight": 1.0, "opening": True}]
-    assert {plan.pick_opening_ident(idents, random.Random(s))["src"] for s in range(50)} == {"real.mp4"}
-    # with none flagged, every ident is eligible
-    unflagged = [{"src": "a.mp4", "dur": 12.0}, {"src": "b.mp4", "dur": 12.0}]
-    assert {plan.pick_opening_ident(unflagged, random.Random(s))["src"] for s in range(50)} \
-        == {"a.mp4", "b.mp4"}
-
-def test_build_plan_fills_show_longer_than_library():
-    # library is 5 x 200 s = 1000 s; the show must still reach its target by
-    # re-shuffling, never playing the same song twice in a row.
-    catalog = {"pieces": [{"file": "/c/p0.mp4", "dur": 1200.0}],
-               "idents": [{"file": "/c/id.mp4", "dur": 12.0}]}
-    library = [{"file": f"/m/s{i}.mp3", "title": f"S{i}", "dur": 200.0} for i in range(5)]
-    cfg = {"seed": 7, "show_dur_sec": 3600.0, "dwell_sec": 600.0,
-           "fps": 60, "resolution": "1280x720", "straddle": True}
-    p = plan.build_plan(catalog, library, cfg)
-    assert p["show_dur_sec"] >= 3600.0
-    files = [m["file"] for m in p["music"]]
-    assert all(a != b for a, b in zip(files, files[1:]))
-
-def test_build_plan_deterministic_and_constraint():
-    catalog = {"pieces": [{"file": f"/c/p{i}.mp4", "dur": 1200.0} for i in range(4)],
-               "idents": [{"file": "/c/id.mp4", "dur": 12.0}]}
-    library = [{"file": f"/m/s{i}.mp3", "title": f"S{i}", "dur": 200.0} for i in range(50)]
-    cfg = {"seed": 42, "show_dur_sec": 3600.0, "dwell_sec": 600.0,
-           "fps": 60, "resolution": "1280x720", "straddle": True}
-    a = plan.build_plan(catalog, library, cfg)
-    b = plan.build_plan(catalog, library, cfg)
-    assert json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)   # deterministic
-    assert a["resolution"] == "1280x720" and a["fps"] == 60
-    assert a["music"] and a["edl"] and a["subtitles"]
-    # DWELL constraint asserted: dwell + max_song <= min piece dur
-    assert cfg["dwell_sec"] + 200.0 <= 1200.0
-    assert a["excluded_songs"] == []
+def test_uncut_needs_a_piece_long_enough():
+    lib = [_song(i, 200.0) for i in range(20)]
+    p = _set(lib, [_piece("p0.mp4", 300.0), _piece("p1.mp4", 300.0)], uncut_share=1.0)
+    for v in p["vods"]:
+        starts = [m["start"] for m in v["music"][1:]]
+        assert all(any(abs(s["tl_start"] - b) < 0.01 for s in v["edl"]) for b in starts)
 
 
-def test_build_plan_excludes_songs_that_bust_the_dwell_budget():
-    catalog = {"pieces": [{"file": "/c/p0.mp4", "dur": 300.0}],
-               "idents": [{"file": "/c/id.mp4", "dur": 12.0}]}
-    library = [{"file": "/m/ok.mp3", "title": "Ok", "dur": 200.0},
-               {"file": "/m/epic.mp3", "title": "Epic", "dur": 540.0}]
-    cfg = {"seed": 1, "show_dur_sec": 600.0, "dwell_sec": 30.0,
-           "fps": 60, "resolution": "1280x720", "straddle": True}
-    p = plan.build_plan(catalog, library, cfg)
-    assert p["excluded_songs"] == ["/m/epic.mp3"]           # 30 + 540 > 300
-    assert {m["file"] for m in p["music"]} == {"/m/ok.mp3"}  # only the fitting song
-    for seg in p["edl"]:
-        if seg["kind"] == "piece":
-            assert seg["out"] <= 300.0 + 1e-6
+def test_vod_title_keeps_every_song_and_truncates_renders():
+    assert plan.vod_title(["A", "B"], ["Supernova Orbit", "Fluid Swirl"]) == \
+        "A - B (Supernova Orbit, Fluid Swirl)"
+    songs = ["Song Title Number One", "Another Song Title", "Third Song Here Okay"]
+    t = plan.vod_title(songs, ["Supernova Orbit", "Radical Rainbow Insanity"])
+    assert len(t) == 100 and t.startswith(" - ".join(songs) + " (")
+    assert t.endswith("...)")
+    # no room for even one character of a render: songs only
+    assert plan.vod_title(["x" * 96], ["Supernova Orbit"]) == "x" * 96
 
+def test_vod_title_truncates_the_last_song_when_songs_alone_overflow():
+    t = plan.vod_title(["a" * 60, "b" * 60], ["Supernova Orbit"])
+    assert len(t) == 100 and t.startswith("a" * 60 + " - b") and t.endswith("...")
 
-def test_build_plan_raises_when_no_song_fits():
-    catalog = {"pieces": [{"file": "/c/p0.mp4", "dur": 100.0}],
-               "idents": [{"file": "/c/id.mp4", "dur": 12.0}]}
-    library = [{"file": "/m/long.mp3", "title": "Long", "dur": 400.0}]
-    cfg = {"seed": 1, "show_dur_sec": 600.0, "dwell_sec": 30.0,
-           "fps": 60, "resolution": "1280x720", "straddle": True}
-    try:
-        plan.build_plan(catalog, library, cfg)
-    except ValueError as e:
-        assert "no songs fit" in str(e)
-    else:
-        assert False, "expected ValueError when every song busts the budget"
+def test_vod_metadata_names_renders_and_links_songs():
+    lib = [_song(0, 100.0), _song(1, 100.0)]
+    p = _set(lib, [_piece("p0.mp4", 600.0, model="supernova_orbit"),
+                   _piece("p1.mp4", 600.0, title="Radical <Rainbow>")],
+             idents=[IDENTS[0]], blurb="#chiptune\nMusic by DTR", uncut_share=1.0)
+    v = p["vods"][0]
+    render = "Supernova Orbit" if v["edl"][1]["src"] == "p0.mp4" else "Radical Rainbow"
+    assert v["title"] == f"{v['music'][0]['title']} - {v['music'][1]['title']} ({render})"
+    assert v["description"].startswith("#chiptune\nMusic by DTR\n")
+    for m in v["music"]:
+        assert f"{m['title']} - https://songs.travisbriggs.com/{m['slug']}/" in v["description"]
+    assert "<" not in v["description"] + v["title"]
 
 
 def test_resolve_media_prefers_sibling_of_catalog(tmp_path):

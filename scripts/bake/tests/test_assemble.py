@@ -1,7 +1,10 @@
-import json, os, subprocess, sys, tempfile
+import json, os, subprocess, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
-import plan, assemble
+import plan, assemble, validate
+
+assemble.PRESET = "ultrafast"          # fixtures are tiny; the real bake uses slow
+
 
 def _probe(path, stream, entry):
     out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", stream,
@@ -9,106 +12,81 @@ def _probe(path, stream, entry):
         capture_output=True, text=True, check=True)
     return out.stdout.strip()
 
-def test_assemble_produces_synced_show(tmp_path):
-    fx = tmp_path / "fx"
-    subprocess.run([os.path.join(HERE, "make_fixtures.sh"), str(fx)], check=True)
-    catalog = plan._load_catalog(str(fx / "catalog" / "catalog.json"))
-    import glob
-    lib = [{"file": p, "title": plan.title_from_path(p), "dur": plan.ffprobe_duration(p)}
-           for p in sorted(glob.glob(str(fx / "music" / "*.mp3")))]
-    cfg = {"seed": 1, "show_dur_sec": 15.0, "dwell_sec": 5.0,
-           "fps": 60, "resolution": "320x180", "straddle": True}
-    p = plan.build_plan(catalog, lib, cfg)
-    plan_path = fx / "plan.json"
-    plan_path.write_text(json.dumps(p))
-    out = fx / "show.mkv"
-    assemble.assemble(str(plan_path), str(out))
 
-    assert out.exists()
-    dur = float(_probe(str(out), "v:0", "format=duration"))
-    assert abs(dur - p["show_dur_sec"]) < 0.5            # video length == show
-    assert _probe(str(out), "v:0", "stream=codec_name") == "h264"
-    assert _probe(str(out), "a:0", "stream=codec_name") == "aac"
-    assert _probe(str(out), "v:0", "stream=width") == "320"
-
-
-def test_offspec_audio_inputs_still_land_in_the_show(tmp_path):
-    """A 48 kHz track and an AIFF-named-.mp3 must occupy their planned slots.
-
-    Fed straight to the concat demuxer these dropped out entirely — a whole song
-    of dead air in the middle of a baked show."""
-    fx = tmp_path / "fx"
-    subprocess.run([os.path.join(HERE, "make_fixtures.sh"), str(fx)], check=True)
-    catalog = plan._load_catalog(str(fx / "catalog" / "catalog.json"))
-    import glob
-    lib = [{"file": p, "title": plan.title_from_path(p), "dur": plan.ffprobe_duration(p)}
-           for p in sorted(glob.glob(str(fx / "music" / "*.mp3")))]
-    cfg = {"seed": 3, "show_dur_sec": 30.0, "dwell_sec": 5.0,
-           "fps": 60, "resolution": "320x180", "straddle": True}
-    p = plan.build_plan(catalog, lib, cfg)
-    assert any("song-five" in m["file"] for m in p["music"]), "fixture not in the timeline"
-    plan_path = fx / "plan.json"
-    plan_path.write_text(json.dumps(p))
-    out = fx / "show.mkv"
-    assemble.assemble(str(plan_path), str(out))
-
-    # every song slot is filled: total audio matches the plan, nothing dropped
-    seg = fx / "seg.wav"
-    for name in ("song-five", "song-four"):
-        m = next(m for m in p["music"] if name in m["file"])
-        mid = (m["start"] + m["end"]) / 2.0
-        subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", str(mid - 1.0), "-i", str(out),
-                        "-t", "2", "-map", "0:a", "-c:a", "pcm_s16le", str(seg)], check=True)
-        assert float(_probe(str(seg), "a:0", "format=duration")) > 1.5, f"{name}: no audio in slot"
-        vol = subprocess.run(["ffmpeg", "-v", "info", "-i", str(seg), "-af", "volumedetect",
-                              "-f", "null", "-"], capture_output=True, text=True).stderr
-        mean = next(l.split("mean_volume:")[1] for l in vol.splitlines() if "mean_volume:" in l)
-        assert float(mean.replace("dB", "").strip()) > -60.0, f"{name}: slot is silent"
-
-
-def _mean_db(path, start, dur):
+def _mean_db(path, start, dur, af="volumedetect"):
     vol = subprocess.run(["ffmpeg", "-v", "info", "-ss", str(start), "-i", str(path), "-t", str(dur),
-                          "-map", "0:a", "-af", "volumedetect", "-f", "null", "-"],
-                         capture_output=True, text=True).stderr
+                          "-map", "0:a", "-af", af + (",volumedetect" if af != "volumedetect" else ""),
+                          "-f", "null", "-"], capture_output=True, text=True).stderr
     mean = next(l.split("mean_volume:")[1] for l in vol.splitlines() if "mean_volume:" in l)
     return float(mean.replace("dB", "").strip())
 
 
-def test_audio_ident_plays_its_own_sound_between_songs(tmp_path):
-    """An ident with audio pauses the music: its sound is on air in its slot,
-    and the following song starts complete after it."""
+def _bake(tmp_path, idents=None, seed=1):
     fx = tmp_path / "fx"
     subprocess.run([os.path.join(HERE, "make_fixtures.sh"), str(fx)], check=True)
+    catalog = plan._load_catalog(str(fx / "catalog" / "catalog.json"))
+    if idents is not None:
+        catalog["idents"] = idents(fx)
+    lib = plan.load_library(str(fx / "music"), set())
+    p = plan.build_set(catalog, lib, {"seed": seed, "swap_at": "2026-11-13T06:00:00-08:00",
+                                      "fps": 60, "resolution": "320x180"})
+    set_dir = fx / "set"
+    set_dir.mkdir()
+    (set_dir / "plan.json").write_text(json.dumps(p))
+    assemble.assemble(str(set_dir / "plan.json"), str(set_dir))
+    return p, set_dir
+
+
+def _loud_ident(fx):
+    """An ident with its own 1500 Hz sound, at another size and frame rate (like
+    the hand-made 720p idents inside a 1080p set)."""
     ident = fx / "catalog" / "loud_ident.mp4"
     subprocess.run(["ffmpeg", "-y", "-v", "error",
-                    "-f", "lavfi", "-i", "color=c=yellow:s=320x180:r=60:d=3",
+                    "-f", "lavfi", "-i", "color=c=yellow:s=640x360:r=30:d=3",
                     "-f", "lavfi", "-i", "sine=f=1500:d=3:sample_rate=48000",
                     "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "pcm_s24le",
                     "-shortest", str(ident)], check=True)
-    catalog = plan._load_catalog(str(fx / "catalog" / "catalog.json"))
-    catalog["idents"] = [{"file": str(ident), "dur": plan.ffprobe_duration(str(ident)),
-                          "weight": 1.0, "opening": True, "audio": plan.ffprobe_has_audio(str(ident))}]
-    assert catalog["idents"][0]["audio"]
-    import glob
-    lib = [{"file": p, "title": plan.title_from_path(p), "dur": plan.ffprobe_duration(p)}
-           for p in sorted(glob.glob(str(fx / "music" / "*.mp3")))]
-    cfg = {"seed": 1, "show_dur_sec": 20.0, "dwell_sec": 5.0,
-           "fps": 60, "resolution": "320x180", "straddle": True}
-    p = plan.build_plan(catalog, lib, cfg)
-    brk = next(s for s in p["edl"] if s.get("audio"))
-    after = next(m for m in p["music"] if m["start"] >= brk["tl_start"])
-    assert after["start"] == round(brk["tl_start"] + brk["out"], 3)   # song waits for the ident
-    plan_path = fx / "plan.json"
-    plan_path.write_text(json.dumps(p))
-    out = fx / "show.mkv"
-    assemble.assemble(str(plan_path), str(out))
+    return [{"src": str(ident), "dur": plan.ffprobe_duration(str(ident)), "weight": 1.0,
+             "audio": plan.ffprobe_has_audio(str(ident))}]
 
-    dur = float(_probe(str(out), "v:0", "format=duration"))
-    assert abs(dur - p["show_dur_sec"]) < 0.5
-    # the 1500 Hz ident tone is what's on air during the break, not a song
-    seg = fx / "brk.wav"
-    subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", str(brk["tl_start"] + 1.0), "-i", str(out),
-                    "-t", "1", "-map", "0:a", "-af", "bandpass=f=1500:w=100", str(seg)], check=True)
-    assert _mean_db(seg, 0, 1) > -45.0
-    # and the next song is audible right after
-    assert _mean_db(out, after["start"] + 0.5, 1.0) > -60.0
+
+def test_every_vod_is_an_upload_ready_mp4_matching_its_plan(tmp_path):
+    p, set_dir = _bake(tmp_path)
+    assert len(p["vods"]) >= 2
+    for v in p["vods"]:
+        out = set_dir / v["file"]
+        assert abs(float(_probe(str(out), "v:0", "format=duration")) - v["dur"]) < 0.5
+        assert _probe(str(out), "a:0", "stream=sample_rate") == "48000"
+    assert validate.validate(str(set_dir / "plan.json"), str(set_dir)) == []
+    assert not [f for f in os.listdir(set_dir) if f.startswith(".work-")]   # no leftovers
+
+
+def test_offspec_audio_inputs_still_land_in_their_slots(tmp_path):
+    """A 48 kHz track and an AIFF-named-.mp3 must be audible in their slots;
+    fed straight to the concat demuxer these once dropped out entirely."""
+    p, set_dir = _bake(tmp_path, seed=3)
+    for name in ("song-five", "song-four"):
+        v = next(v for v in p["vods"] if any(name in m["file"] for m in v["music"]))
+        m = next(m for m in v["music"] if name in m["file"])
+        mid = (m["start"] + m["end"]) / 2.0
+        assert _mean_db(set_dir / v["file"], mid - 1.0, 2.0) > -60.0, f"{name}: slot is silent"
+
+
+def test_audio_ident_is_preroll_with_its_own_sound_even_at_another_size(tmp_path):
+    p, set_dir = _bake(tmp_path, idents=_loud_ident)
+    v = p["vods"][0]
+    out = set_dir / v["file"]
+    assert _probe(str(out), "v:0", "stream=width") == "320"
+    # the ident's 1500 Hz tone is on air before the music, then song 1 plays
+    assert _mean_db(out, 1.0, 1.0, af="bandpass=f=1500:w=100") > -45.0
+    assert _mean_db(out, v["music"][0]["start"] + 0.5, 1.0) > -60.0
+
+
+def test_a_rerun_skips_finished_vods(tmp_path):
+    p, set_dir = _bake(tmp_path)
+    first = set_dir / p["vods"][0]["file"]
+    before = first.stat().st_mtime_ns
+    (set_dir / p["vods"][1]["file"]).unlink()
+    assemble.assemble(str(set_dir / "plan.json"), str(set_dir))
+    assert first.stat().st_mtime_ns == before
+    assert validate.validate(str(set_dir / "plan.json"), str(set_dir)) == []

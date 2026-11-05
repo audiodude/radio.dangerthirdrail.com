@@ -1,0 +1,9 @@
+[Unit]
+Description=radio station job, hourly (the Friday swap runs at 06:00 PT)
+
+[Timer]
+OnCalendar=*-*-* *:00:00 America/Los_Angeles
+Persistent=true
+
+[Install]
+WantedBy=timers.target

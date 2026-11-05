@@ -1,33 +1,40 @@
 #!/usr/bin/env python3
-"""Realize a plan.json into one muxed show file.
+"""Realize a set plan into one upload-ready MP4 per VOD.
 
-Three ffmpeg passes: video (concat EDL segments via the concat demuxer with
-inpoint/outpoint, burn ASS titles, encode copy-safe H.264), audio (concat the
-playlist, encode AAC), mux (stream-copy both). One video encode pass total.
+Per VOD: video (each EDL segment trimmed, scaled to the set resolution and
+concatenated in one filter graph, titles burned, one x264 pass), audio (each
+clip decoded to identical PCM, concatenated, AAC), then a stream-copy mux.
+VOD files are written atomically and skipped if present, so a crashed bake
+resumes where it stopped.
 """
 import json
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 
+PRESET = os.environ.get("BAKE_PRESET", "slow")
+CRF = os.environ.get("BAKE_CRF", "18")
+MAXRATE = os.environ.get("BAKE_MAXRATE", "20M")   # peak cap: bounds a set to ~58 GB on disk
+BUFSIZE = os.environ.get("BAKE_BUFSIZE", "40M")
 
-def _ts(sec: float) -> str:
-    h = int(sec // 3600); m = int((sec % 3600) // 60)
-    s = sec - h * 3600 - m * 60
+
+def _ass_t(sec: float) -> str:
+    h = int(sec // 3600); m = int((sec % 3600) // 60); s = sec - h * 3600 - m * 60
     return f"{h:d}:{m:02d}:{s:05.2f}"
 
 
 def write_ass(subs: list[dict], path: str, resolution: str):
-    w, h = resolution.split("x")
+    w, h = (int(x) for x in resolution.split("x"))
+    size = round(28 * h / 720)                     # the 720p look, at any size
     head = (
         "[Script Info]\nScriptType: v4.00+\n"
         f"PlayResX: {w}\nPlayResY: {h}\n\n"
         "[V4+ Styles]\n"
         "Format: Name, Fontname, Fontsize, PrimaryColour, BackColour, Bold, "
         "Alignment, MarginL, MarginR, MarginV\n"
-        "Style: t,DejaVu Sans,28,&H00FFFFFF,&H64000000,1,1,40,40,40\n\n"
+        f"Style: t,DejaVu Sans,{size},&H00FFFFFF,&H64000000,1,1,"
+        f"{round(40 * h / 720)},{round(40 * h / 720)},{round(40 * h / 720)}\n\n"
         "[Events]\nFormat: Layer, Start, End, Style, Text\n")
     lines = []
     for c in subs:
@@ -39,103 +46,83 @@ def write_ass(subs: list[dict], path: str, resolution: str):
         f.write(head + "\n".join(lines) + "\n")
 
 
-def _ass_t(sec: float) -> str:
-    h = int(sec // 3600); m = int((sec % 3600) // 60); s = sec - h * 3600 - m * 60
-    return f"{h:d}:{m:02d}:{s:05.2f}"
-
-
 def _run(cmd):
     subprocess.run(cmd, check=True)
 
 
-def assemble(plan_path: str, out_path: str):
-    work = tempfile.mkdtemp(prefix="bake_")
-    try:
-        _assemble(plan_path, out_path, work)
-    finally:
-        # The intermediates are the size of the show itself (~16 GB) plus ~4 GB of
-        # normalized audio; leaving them behind fills the box in a few nights.
-        shutil.rmtree(work, ignore_errors=True)
+def assemble_vod(vod: dict, fps: int, res: str, out_path: str, work: str):
+    w, h = res.split("x")
 
-
-def _assemble(plan_path: str, out_path: str, work: str):
-    with open(plan_path) as f:
-        p = json.load(f)
-    fps = int(p["fps"]); res = p["resolution"]; gop = 2 * fps
-
-    # --- video concat list (concat demuxer, frame-accurate via inpoint/outpoint) ---
-    vlist = os.path.join(work, "video.txt")
-    with open(vlist, "w") as f:
-        for seg in p["edl"]:
-            f.write(f"file '{os.path.abspath(seg['src'])}'\n")
-            f.write(f"inpoint {seg['in']}\n")
-            f.write(f"outpoint {round(seg['in'] + seg['out'], 3)}\n")
-
+    # --- video: trim + scale every segment (720p idents mix with 1080p pieces) ---
     ass = os.path.join(work, "titles.ass")
-    write_ass(p["subtitles"], ass, res)
+    write_ass(vod["subtitles"], ass, res)
+    inputs, chains = [], []
+    for k, seg in enumerate(vod["edl"]):
+        inputs += ["-ss", str(seg["in"]), "-t", str(seg["out"]), "-i", os.path.abspath(seg["src"])]
+        chains.append(f"[{k}:v]scale={w}:{h}:flags=lanczos,setsar=1,fps={fps},"
+                      f"format=yuv420p,setpts=PTS-STARTPTS[v{k}]")
+    n = len(vod["edl"])
+    graph = ";".join(chains) + ";" + "".join(f"[v{k}]" for k in range(n)) + \
+        f"concat=n={n}:v=1:a=0[cat];[cat]subtitles=filename='{ass}'[vout]"
+    video = os.path.join(work, "video.mp4")
+    _run(["ffmpeg", "-y", "-loglevel", "warning", *inputs, "-filter_complex", graph,
+          "-map", "[vout]", "-c:v", "libx264", "-preset", PRESET, "-crf", CRF,
+          "-maxrate", MAXRATE, "-bufsize", BUFSIZE,
+          "-g", str(fps // 2), "-bf", "2", "-pix_fmt", "yuv420p", "-an", video])
 
-    video = os.path.join(work, "video.mkv")
-    _br = os.environ.get("BAKE_VBITRATE", "6M")
-    _run(["ffmpeg", "-y", "-loglevel", "warning",
-          "-f", "concat", "-safe", "0", "-i", vlist,
-          "-vf", f"subtitles='{ass}',scale={res.replace('x',':')}:flags=lanczos,fps={fps}",
-          "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p",
-          "-g", str(gop), "-keyint_min", str(gop), "-sc_threshold", "0",
-          # CBR: minrate=maxrate=b:v + nal-hrd=cbr forces a STEADY wire bitrate.
-          # VBR (-b:v/-maxrate only) let dark scenes + the near-black ident dip to
-          # a few hundred kbps, tripping YouTube's "Video output low" and ending
-          # the broadcast. CBR also spends those bits on quality (less banding).
-          "-b:v", _br, "-minrate", _br, "-maxrate", _br,
-          "-bufsize", _br, "-x264-params", "nal-hrd=cbr",
-          "-an", video])
-
-    # --- audio: normalize each track, then concat (playlist order) ---
+    # --- audio: pre-roll ident (if it has sound) then the songs ---
     # The concat demuxer can't switch decoder parameters mid-stream, and the
     # library is not uniform: 48 kHz files, mono files, and at least one that is
-    # PCM wearing an .mp3 name. Feeding those straight to concat dropped a whole
-    # track from one night's show — 2:17 of dead air on air. So decode each song
-    # to identical PCM first, clamped to exactly the slot the plan gave it
-    # (apad fills a short decode, -t trims a long one), which also stops decode
-    # length from drifting away from the subtitle timings over 160+ songs.
-    # Audio idents (EDL segments flagged `audio`) are breaks between songs: the
-    # plan already shifted the music past them, so they slot into the same
-    # normalize-then-concat sequence in show-time order.
-    clips = [(float(s["start"]), s["file"], round(float(s["end"]) - float(s["start"]), 3))
-             for s in p["music"]]
-    clips += [(float(s["tl_start"]), s["src"], float(s["out"]))
-              for s in p["edl"] if s.get("audio")]
-    clips.sort(key=lambda c: c[0])
-    norm = os.path.join(work, "audio")
-    os.makedirs(norm, exist_ok=True)
+    # PCM wearing an .mp3 name. Feeding those straight to concat once dropped a
+    # whole track (2:17 of dead air). So decode each clip to identical PCM first,
+    # clamped to exactly its planned slot (apad fills a short decode, -t trims a
+    # long one). No gain: the library is stored at the on-air level.
+    clips = [(m["file"], round(m["end"] - m["start"], 3)) for m in vod["music"]]
+    if vod["ident"]["audio"]:
+        clips.insert(0, (vod["ident"]["src"], vod["music"][0]["start"]))
     alist = os.path.join(work, "audio.txt")
     with open(alist, "w") as f:
-        for i, (_, src, slot) in enumerate(clips):
-            wav = os.path.join(norm, f"{i:04d}.wav")
+        for i, (src, slot) in enumerate(clips):
+            wav = os.path.join(work, f"{i:02d}.wav")
             _run(["ffmpeg", "-y", "-loglevel", "error", "-i", os.path.abspath(src),
                   "-vn", "-af", "apad", "-t", str(slot),
-                  "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le", wav])
+                  "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le", wav])
             f.write(f"file '{wav}'\n")
-    # No gain here: scripts/library/sync_site.py stores every song already
-    # loudness-normalized to the on-air level (-21 LUFS, gain-only), so the
-    # show plays the files as they are. (This used to be a blanket -7 dB over
-    # unnormalized songs; audio idents now play at their own level here too,
-    # as they already did in the opening.)
     audio = os.path.join(work, "audio.m4a")
     _run(["ffmpeg", "-y", "-loglevel", "warning", "-f", "concat", "-safe", "0", "-i", alist,
-          "-c:a", "aac", "-b:a", "128k", "-ar", "44100", "-ac", "2", audio])
+          "-c:a", "aac", "-b:a", "384k", "-ar", "48000", "-ac", "2", audio])
 
     # --- mux (stream-copy), atomic rename ---
-    tmp_out = out_path + ".tmp.mkv"
+    tmp_out = out_path + ".tmp.mp4"
     _run(["ffmpeg", "-y", "-loglevel", "warning", "-i", video, "-i", audio,
-          "-c", "copy", "-shortest", tmp_out])
+          "-map", "0:v", "-map", "1:a", "-c", "copy", "-shortest",
+          "-movflags", "+faststart", tmp_out])
     os.replace(tmp_out, out_path)
-    print(f"[assemble] wrote {out_path}")
+
+
+def assemble(plan_path: str, out_dir: str):
+    with open(plan_path) as f:
+        p = json.load(f)
+    os.makedirs(out_dir, exist_ok=True)
+    for vod in p["vods"]:
+        out = os.path.join(out_dir, vod["file"])
+        if os.path.exists(out):
+            continue
+        # Intermediates go next to the output: /tmp may be small, and a VOD's
+        # decoded audio and video are a few GB.
+        work = tempfile.mkdtemp(prefix=".work-", dir=out_dir)
+        try:
+            assemble_vod(vod, int(p["fps"]), p["resolution"], out, work)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        print(f"[assemble] {vod['file']} ({vod['index'] + 1}/{len(p['vods'])}, "
+              f"{vod['dur']:.0f}s)", flush=True)
 
 
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--plan", required=True)
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--out-dir", required=True)
     a = ap.parse_args()
-    assemble(a.plan, a.out)
+    assemble(a.plan, a.out_dir)

@@ -1,0 +1,9 @@
+[Unit]
+Description=radio station weekly set bake (Wed 03:00 PT, for Friday's swap)
+
+[Timer]
+OnCalendar=Wed *-*-* 03:00:00 America/Los_Angeles
+Persistent=true
+
+[Install]
+WantedBy=timers.target

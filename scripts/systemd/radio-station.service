@@ -1,0 +1,9 @@
+[Unit]
+Description=radio station: upload, swap, delete, health check
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/radio.env
+ExecStart=/usr/bin/python3 /opt/radio/scripts/station/station.py run
