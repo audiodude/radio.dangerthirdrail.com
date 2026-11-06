@@ -74,3 +74,10 @@ Branch `youtube-station`. Stdlib-only Python, matching the bake and monitor.
 - 2026-11-05: probe upload from the box landed unlisted (force-ssl token).
   Encode benchmark at 1080p60 CRF 18 slow: 2.4× slower than realtime;
   `supernova_orbit` 39 Mbps uncapped, `fluid_swirl` 8 Mbps → 20 Mbps cap.
+- 2026-11-05 evening: station code merged and deployed to the box; units
+  installed, `radio-station.timer` + `radio-station-bake.timer` enabled; the
+  live `radio-bake.timer` disabled (playout replays `show-2026-11-05` until
+  cutover); old shows pruned; `BAKE_RES=1920x1080`. Station playlist created:
+  `PLG_1kc8loxkk`. A detached chain on the render host publishes `catalog_1080`
+  when the render finishes and starts the launch bake (`bake.sh --now`, unit
+  `radio-station-bake-now`). Target: station live Saturday 2026-11-07.
