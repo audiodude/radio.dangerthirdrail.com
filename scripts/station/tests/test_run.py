@@ -375,6 +375,32 @@ def test_health_check_waits_for_playlist_reads_to_settle_after_a_swap(world):
     assert world.state()["last_health"] == "2026-11-06"
 
 
+def test_every_processed_vod_gets_the_thumbnail_once(world):
+    world.register("20261113", n=3, swap_at=FRI_SWAP)
+    world.run()                                           # uploads; nothing processed yet
+    assert world.fake.thumbnails == {}
+    world.clock.set("2026-11-12T03:00:00-08:00")
+    world.run()
+    ids = uploaded(world, "20261113")
+    assert set(world.fake.thumbnails) == set(ids)
+    assert all(t == ("image/jpeg", world.thumb.read_bytes()) for t in world.fake.thumbnails.values())
+    world.clock.set("2026-11-12T04:00:00-08:00")
+    world.run()
+    assert world.fake.count("POST", "thumbnail") == 3     # never re-set
+
+
+def test_rejected_thumbnail_alerts_once_and_is_not_retried(world):
+    world.fake.fail[("POST", "thumbnail")] = (403, "forbidden")
+    world.register("20261113", n=2, swap_at=FRI_SWAP)
+    world.run()
+    world.clock.set("2026-11-12T03:00:00-08:00")
+    assert world.run() == 0
+    world.clock.set("2026-11-12T04:00:00-08:00")
+    world.run()
+    assert world.fake.count("POST", "thumbnail") == 2
+    assert len(msgs_with(world, "thumbnail failed")) == 1
+
+
 def test_unexpected_error_alerts_once_until_a_clean_run(world):
     world.fake.fail[("POST", "playlists")] = (500, "backendError")
     assert world.run() == 1

@@ -105,6 +105,7 @@ class Config:
     blurb_file: str
     playlist_title: str
     s3_uri: str
+    thumbnail: str = ""
 
     @classmethod
     def from_env(cls):
@@ -115,6 +116,7 @@ class Config:
             blurb_file=os.environ.get("STATION_BLURB_FILE") or "/etc/radio-blurb.txt",
             playlist_title=os.environ.get("STATION_PLAYLIST_TITLE") or DEFAULT_TITLE,
             s3_uri=(os.environ.get("S3_SHOWS_URI") or "").rstrip("/"),
+            thumbnail=os.environ.get("STATION_THUMBNAIL") or "/etc/radio-thumbnail.jpg",
         )
 
 
@@ -284,6 +286,7 @@ class Station:
         try:
             self.ensure_playlist()
             self.check_processing()
+            self.thumbnails()
             self.swap()
             self.readiness_alerts()
             self.retire_old_sets()
@@ -329,6 +332,31 @@ class Station:
         self.alert_once("playlist-created",
                         f"created the station playlist https://www.youtube.com/playlist?list={pid} "
                         f"— bind the station to it in YouTube Studio (Start Station)")
+
+    # thumbnails: every processed VOD of the live and pending sets, once
+    def thumbnails(self):
+        path = self.cfg.thumbnail
+        if not path or not os.path.isfile(path):
+            return
+        for seed, s in self.state["sets"].items():
+            if s["status"] not in ("live", "pending"):
+                continue
+            for v in s["vods"]:
+                if not v["video_id"] or not v["processed"] or v.get("thumbnail"):
+                    continue
+                try:
+                    self._api(self.yt.set_thumbnail, v["video_id"], path)
+                except youtube.YouTubeError as e:
+                    if isinstance(e, youtube.AuthError) or e.status >= 500:
+                        raise
+                    # A 4xx won't fix itself; don't spend 50 units an hour on it.
+                    v["thumbnail"] = "failed"
+                    self.alert_once(f"thumbnail:{seed}",
+                                    f"set {seed}: setting the thumbnail failed ({e}); "
+                                    f"those VODs keep YouTube's auto thumbnail")
+                else:
+                    v["thumbnail"] = True
+                self.save()
 
     def _count_attempt(self, seed, vod, why):
         vod["attempts"] += 1

@@ -40,9 +40,12 @@ class World:
         self.dir.mkdir()
         blurb = tmp_path / "blurb.txt"
         blurb.write_text("Shocking visuals, all week.\n")
+        self.thumb = tmp_path / "thumb.jpg"
+        self.thumb.write_bytes(b"\xff\xd8 jpeg bytes")
         self.cfg = station.Config(
             station_dir=str(self.dir), state_path=str(self.dir / "state.json"),
-            blurb_file=str(blurb), playlist_title="Test Station", s3_uri="s3://bucket/shows")
+            blurb_file=str(blurb), playlist_title="Test Station", s3_uri="s3://bucket/shows",
+            thumbnail=str(self.thumb))
         self.fake = FakeYouTube()
         self.yt = youtube.YouTube("cid", "secret", "refresh", transport=self.fake,
                                   chunk_size=CHUNK, clock=lambda: 0.0)

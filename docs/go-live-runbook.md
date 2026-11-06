@@ -51,10 +51,12 @@ The S3 music library mirrors songs.travisbriggs.com: run
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | Alert bot and chat |
 | `MUSIC_DIR`, `CATALOG_DIR` | `/data/music`, `/data/catalog` |
 | `BAKE_RES` | `1920x1080` (or unset) |
-| Optional | `STATION_DIR` (`/data/station`), `STATION_BLURB_FILE` (`/etc/radio-blurb.txt`), `STATION_PLAYLIST_TITLE`, `BAKE_MIN_FREE_GB` (70), `BAKE_PRESET`/`BAKE_CRF`/`BAKE_MAXRATE`/`BAKE_BUFSIZE` |
+| Optional | `STATION_DIR` (`/data/station`), `STATION_BLURB_FILE` (`/etc/radio-blurb.txt`), `STATION_THUMBNAIL` (`/etc/radio-thumbnail.jpg`), `STATION_PLAYLIST_TITLE`, `BAKE_MIN_FREE_GB` (70), `BAKE_PRESET`/`BAKE_CRF`/`BAKE_MAXRATE`/`BAKE_BUFSIZE` |
 
 `/etc/radio-blurb.txt` opens every VOD description and is the playlist's
-description: plain text, multiple lines are fine.
+description: plain text, multiple lines are fine. `/etc/radio-thumbnail.jpg`
+(a copy of `assets/station-thumbnail.jpg`) is set on every VOD; without it VODs
+keep YouTube's auto thumbnail.
 
 ## Launch (first set)
 

@@ -16,6 +16,7 @@ API = "https://www.googleapis.com/youtube/v3"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 UPLOAD_URL = ("https://www.googleapis.com/upload/youtube/v3/videos"
               "?uploadType=resumable&part=snippet,status&notifySubscribers=false")
+THUMBNAIL_URL = "https://www.googleapis.com/upload/youtube/v3/thumbnails/set"
 CHUNK_UNIT = 256 * 1024
 DEFAULT_CHUNK = 64 * 1024 * 1024
 MAX_STALLS = 3
@@ -216,6 +217,17 @@ class YouTube:
 
     def delete_video(self, video_id):
         self._api("DELETE", "videos", {"id": video_id})
+
+    def set_thumbnail(self, video_id, path):
+        """Custom thumbnail (JPEG/PNG, ≤ 2 MB, 16:9); 50 quota units."""
+        with open(path, "rb") as f:
+            image = f.read()
+        ctype = "image/png" if path.lower().endswith(".png") else "image/jpeg"
+        status, _, data = self._send(
+            "POST", f"{THUMBNAIL_URL}?{urllib.parse.urlencode({'videoId': video_id})}",
+            {"Content-Type": ctype}, image)
+        if status >= 400:
+            raise _error(status, data)
 
     # --- playlists ---
 

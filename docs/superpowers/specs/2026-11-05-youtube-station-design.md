@@ -47,7 +47,8 @@ looping, for a week.
   `BROADCAST_DESCRIPTION`, kept in `/etc/radio-blurb.txt`), then the songs
   with links (`https://songs.travisbriggs.com/<slug>/`), then render credits.
 - Unlisted, category Music (10), not made for kids, no tags, no subscriber
-  notification, YouTube's auto thumbnail.
+  notification. Custom thumbnail `/etc/radio-thumbnail.jpg` (the Pink Fluffy
+  Cloud card, `assets/station-thumbnail.jpg`) set on each VOD once processed.
 
 ## Encode
 

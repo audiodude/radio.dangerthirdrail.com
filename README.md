@@ -164,6 +164,10 @@ lives in `/data/station/state.json` (atomic writes, `flock`).
   notification. The session URL is saved before any bytes go out, so a crash resumes
   instead of duplicating. YouTube's per-channel upload cap (`uploadLimitExceeded`) pauses
   uploads for 24 h; failed or rejected processing re-uploads.
+- **Thumbnail**: once a VOD is processed it gets the station thumbnail
+  ([`assets/station-thumbnail.jpg`](assets/station-thumbnail.jpg), installed on the box as
+  `/etc/radio-thumbnail.jpg`; 50 quota units each). A rejected thumbnail alerts once and
+  isn't retried.
 - **Swap**: append the new set in order, then remove the old items, so the playlist is
   never empty. A swap interrupted halfway finishes on the next run; a playlist found out
   of order is left alone and alerted.

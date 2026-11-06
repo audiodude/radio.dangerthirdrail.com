@@ -39,6 +39,7 @@ class FakeYouTube:
         self.crash_before = None        # (METHOD, endpoint, n): crash instead of the nth such call
         self.page_size = 3
         self.list_lag = False           # listings omit the newest item (YouTube's read lag)
+        self.thumbnails = {}            # video id -> (content type, bytes)
         self._n = 0
 
     def _id(self, prefix):
@@ -75,6 +76,8 @@ class FakeYouTube:
         q = {k: v[0] for k, v in urllib.parse.parse_qs(parts.query).items()}
         if parts.path == "/upload/youtube/v3/videos":
             endpoint = "upload"
+        elif parts.path == "/upload/youtube/v3/thumbnails/set":
+            endpoint = "thumbnail"
         else:
             assert parts.path.startswith("/youtube/v3/"), url
             endpoint = parts.path[len("/youtube/v3/"):]
@@ -89,6 +92,12 @@ class FakeYouTube:
             if self.quota_budget <= 0:
                 return _err(403, "quotaExceeded")
             self.quota_budget -= 1
+        if endpoint == "thumbnail":                      # raw image body, not JSON
+            vid = q["videoId"]
+            if vid not in self.videos:
+                return _err(404, "videoNotFound")
+            self.thumbnails[vid] = (headers["content-type"], body)
+            return _resp(200, {"kind": "youtube#thumbnailSetResponse"})
         doc = json.loads(body) if body else None
         handler = getattr(self, f"_{method.lower()}_{endpoint}")
         return handler(q, headers, doc)
