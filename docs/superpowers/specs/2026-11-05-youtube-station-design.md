@@ -36,7 +36,7 @@ looping, for a week.
 
 ## VOD metadata
 
-- **Title** (≤100 chars): `Song A - Song B (Render 1, Render 2)`. Every song
+- **Title** (≤100 chars): `Song A / Song B (Render 1, Render 2)`. Every song
   title is always kept; the render list is best effort and is truncated with
   `...` (`(Supernova Or...)`), or dropped if not even that fits. If the songs
   alone exceed 100 chars, the last song is truncated with `...`.

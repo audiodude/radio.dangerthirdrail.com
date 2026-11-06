@@ -140,7 +140,7 @@ week's set can always be re-derived.
 - **Rotation**: pieces go least-recently-used across the whole set and never play twice in
   a row, even across VODs and the loop seam. Each segment starts at a random in-point.
 - **Titles**: each song's name is burned in as a `♪ Song Title` ASS subtitle that fades in
-  and out. The VOD's YouTube title is `Song A - Song B (Render, Render)` (≤ 100 chars:
+  and out. The VOD's YouTube title is `Song A / Song B (Render, Render)` (≤ 100 chars:
   every song kept, renders truncated with `...`); the description is the station blurb
   (`/etc/radio-blurb.txt`), the songs with links, and the render credits.
 - **Encode**: per VOD, x264 `slow` CRF 18 with a 20 Mbps peak cap (`BAKE_PRESET`,

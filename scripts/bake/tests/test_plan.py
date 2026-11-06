@@ -141,17 +141,17 @@ def test_uncut_needs_a_piece_long_enough():
 
 def test_vod_title_keeps_every_song_and_truncates_renders():
     assert plan.vod_title(["A", "B"], ["Supernova Orbit", "Fluid Swirl"]) == \
-        "A - B (Supernova Orbit, Fluid Swirl)"
+        "A / B (Supernova Orbit, Fluid Swirl)"
     songs = ["Song Title Number One", "Another Song Title", "Third Song Here Okay"]
     t = plan.vod_title(songs, ["Supernova Orbit", "Radical Rainbow Insanity"])
-    assert len(t) == 100 and t.startswith(" - ".join(songs) + " (")
+    assert len(t) == 100 and t.startswith(" / ".join(songs) + " (")
     assert t.endswith("...)")
     # no room for even one character of a render: songs only
     assert plan.vod_title(["x" * 96], ["Supernova Orbit"]) == "x" * 96
 
 def test_vod_title_truncates_the_last_song_when_songs_alone_overflow():
     t = plan.vod_title(["a" * 60, "b" * 60], ["Supernova Orbit"])
-    assert len(t) == 100 and t.startswith("a" * 60 + " - b") and t.endswith("...")
+    assert len(t) == 100 and t.startswith("a" * 60 + " / b") and t.endswith("...")
 
 def test_vod_metadata_names_renders_and_links_songs():
     lib = [_song(0, 100.0), _song(1, 100.0)]
@@ -160,7 +160,7 @@ def test_vod_metadata_names_renders_and_links_songs():
              idents=[IDENTS[0]], blurb="#chiptune\nMusic by DTR", uncut_share=1.0)
     v = p["vods"][0]
     render = "Supernova Orbit" if v["edl"][1]["src"] == "p0.mp4" else "Radical Rainbow"
-    assert v["title"] == f"{v['music'][0]['title']} - {v['music'][1]['title']} ({render})"
+    assert v["title"] == f"{v['music'][0]['title']} / {v['music'][1]['title']} ({render})"
     assert v["description"].startswith("#chiptune\nMusic by DTR\n")
     for m in v["music"]:
         assert f"{m['title']} - https://songs.travisbriggs.com/{m['slug']}/" in v["description"]

@@ -139,10 +139,10 @@ def build_visuals(span, boundaries, rot, rng, uncut_share=UNCUT_SHARE, max_seg=M
 
 
 def vod_title(songs: list[str], renders: list[str], limit=TITLE_MAX) -> str:
-    """`Song A - Song B (Render 1, Render 2)`. Every song title stays; the render
+    """`Song A / Song B (Render 1, Render 2)`. Every song title stays; the render
     list is best effort, truncated with `...` or dropped. Songs alone over the
-    limit truncate the last song."""
-    base = " - ".join(songs)
+    limit truncate the last song. (Not " - ": "Foo - Bar" reads as song Foo by Bar.)"""
+    base = " / ".join(songs)
     if len(base) > limit:
         return base[:limit - 3].rstrip() + "..."
     room = limit - len(base) - 3                 # " (" + ")"
