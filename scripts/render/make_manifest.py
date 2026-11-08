@@ -55,7 +55,9 @@ def main():
 
     n_pieces = sum(1 for p in pieces if p.get("kind") == "piece")
     n_idents = sum(1 for p in pieces if p.get("kind") == "ident")
-    print(f"[make_manifest] wrote {catalog_path}: {n_pieces} pieces, {n_idents} idents")
+    n_songs = sum(1 for p in pieces if p.get("kind") == "song")
+    print(f"[make_manifest] wrote {catalog_path}: {n_pieces} pieces, {n_idents} idents, "
+          f"{n_songs} song renders")
 
 if __name__ == "__main__":
     main()

@@ -233,7 +233,34 @@ def _youtube_safe(text: str) -> str:
     return text.replace("<", "").replace(">", "")     # YouTube rejects angle brackets
 
 
-def build_vod(songs, ident, rot, rng, avoid_last=()) -> dict:
+def _visuals(music, span, synced, rot, rng, avoid_last=()) -> list[dict]:
+    """Visuals for VOD time `span`. A song with a song render (`synced`, keyed
+    by file name) plays it from the song's first frame to its last, unbroken
+    (exempt from MAX_SEG: the render IS the song); every run of other songs
+    gets pieces from the rotation, as `build_visuals` lays them out."""
+    vis_start, end = span
+    starts = [m["start"] for m in music[1:]]
+    segs, run = [], None                     # run: start of pending unsynced songs
+    for m in music:
+        r = synced.get(os.path.basename(m["file"]))
+        if r is None:
+            if run is None:
+                run = max(m["start"], vis_start)
+            continue
+        if run is not None:
+            segs += build_visuals((run, m["start"]), starts, rot, rng)
+            run = None
+        a = max(m["start"], vis_start)       # a silent ident covers its opening
+        if m["end"] - a > 1e-6:
+            segs.append({"kind": "piece", "src": r["src"], "in": round(a - m["start"], 3),
+                         "out": round(m["end"] - a, 3), "tl_start": round(a, 3),
+                         "synced": True})
+    if run is not None:
+        segs += build_visuals((run, end), starts, rot, rng, avoid_last=avoid_last)
+    return segs
+
+
+def build_vod(songs, ident, rot, rng, avoid_last=(), synced=None) -> dict:
     """One VOD: an audio ident is pre-roll (music starts after it); a silent
     ident plays over the start of song 1. Times are VOD-relative."""
     pre = ident["dur"] if ident.get("audio") else 0.0
@@ -248,8 +275,8 @@ def build_vod(songs, ident, rot, rng, avoid_last=()) -> dict:
                  "out": round(vis_start, 3), "tl_start": 0.0}
     if ident.get("audio"):
         ident_seg["audio"] = True
-    edl = [ident_seg] + build_visuals((vis_start, end), [m["start"] for m in music[1:]],
-                                      rot, rng, avoid_last=avoid_last)
+    edl = [ident_seg] + _visuals(music, (vis_start, end), synced or {}, rot, rng,
+                                 avoid_last=avoid_last)
     return {"dur": round(end, 3), "ident": {"src": ident["src"], "dur": ident["dur"],
                                             "audio": bool(ident.get("audio"))},
             "music": music, "edl": edl,
@@ -263,6 +290,28 @@ def _sha(parts) -> str:
     for p in parts:
         h.update(str(p).encode())
     return h.hexdigest()[:16]
+
+
+def match_song_renders(renders: list[dict], library: list[dict]) -> dict:
+    """Song renders usable this set, keyed by song file name: the song is in the
+    library, its bytes (sha256) are the ones the render was made from, and the
+    render covers the whole song. Of several, the newest wins. A stale render
+    would drift off the music, so it is dropped (logged) and the song gets
+    rotation pieces."""
+    import sys
+    songs = {os.path.basename(s["file"]): s for s in library}
+    out = {}
+    for r in sorted(renders, key=lambda r: r.get("rendered_at", "")):
+        s = songs.get(r["song"])
+        if s is None:
+            continue
+        if r.get("song_sha256") != s.get("sha256"):
+            print(f"[plan] stale song render {r['src']}: {r['song']} changed since", file=sys.stderr)
+        elif float(r["dur"]) < float(s["dur"]) - 1e-3:
+            print(f"[plan] short song render {r['src']}: {r['dur']}s < {s['dur']}s", file=sys.stderr)
+        else:
+            out[r["song"]] = r
+    return out
 
 
 def build_set(catalog: dict, library: list[dict], config: dict) -> dict:
@@ -281,13 +330,14 @@ def build_set(catalog: dict, library: list[dict], config: dict) -> dict:
     weights = config.get("weights") or {"all": {"default": True}}
     rot = Rotation(piece_bag(pieces, weights, random.Random(f"pieces:{seed}")))
     rng = random.Random(f"edl:{seed}")
-    names = {p["src"]: render_name(p) for p in pieces}
+    synced = match_song_renders(catalog.get("songs", []), library)
+    names = {p["src"]: render_name(p) for p in pieces + list(synced.values())}
 
     vods = []
     for k, (group, ident) in enumerate(zip(groups, idents)):
         first = vods[0]["edl"][1:2] if vods else []
         avoid = {first[0]["src"]} if k == len(groups) - 1 and first else ()
-        v = build_vod(group, ident, rot, rng, avoid_last=avoid)
+        v = build_vod(group, ident, rot, rng, avoid_last=avoid, synced=synced)
         renders = list(dict.fromkeys(names[s["src"]] for s in v["edl"] if s["kind"] == "piece"))
         vods.append({"index": k, "file": f"vod-{k:03d}.mp4",
                      "title": _youtube_safe(vod_title([m["title"] for m in v["music"]], renders)),
@@ -323,18 +373,20 @@ def _load_catalog(path: str) -> dict:
     with open(path) as f:
         data = json.load(f)
     here = os.path.dirname(os.path.abspath(path))
-    out = {"pieces": [], "idents": []}
+    out = {"pieces": [], "idents": [], "songs": []}
     for e in data["pieces"]:
-        key = {"piece": "pieces", "ident": "idents"}.get(e["kind"])
+        key = {"piece": "pieces", "ident": "idents", "song": "songs"}.get(e["kind"])
         if key is None:
             continue
         f_path = resolve_media(e["file"], here)
         item = {"src": f_path, "dur": ffprobe_duration(f_path)}
-        if key == "pieces":
-            item.update(model=e.get("model", os.path.splitext(os.path.basename(f_path))[0]),
-                        preset=e.get("preset", ""))
+        if key in ("pieces", "songs"):
+            item.update(model=e.get("model", os.path.splitext(os.path.basename(f_path))[0]))
             if e.get("title"):
                 item["title"] = e["title"]
+            if key == "songs":
+                item.update(song=e["song"], song_sha256=e["song_sha256"],
+                            rendered_at=e.get("rendered_at", ""))
         else:
             weight = e.get("weight", 1)
             if weight != int(weight) or weight <= 0:
@@ -355,11 +407,21 @@ def load_denylist(path: str) -> set[str]:
         return {line.split("#", 1)[0].strip() for line in f} - {""}
 
 
+def sha256_file(path: str) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
 def load_library(library_dir: str, denied: set[str]) -> list[dict]:
+    """`sha256` lets a song render prove it was made from these exact bytes."""
     import glob
     paths = sorted(glob.glob(os.path.join(library_dir, "*.mp3")))
     return [{"file": p, "title": title_from_path(p), "dur": ffprobe_duration(p),
-             "slug": os.path.splitext(os.path.basename(p))[0]}
+             "slug": os.path.splitext(os.path.basename(p))[0], "sha256": sha256_file(p)}
             for p in paths if os.path.basename(p) not in denied]
 
 
@@ -388,8 +450,9 @@ def main():
     plan_doc = build_set(_load_catalog(a.catalog), library, cfg)
     with open(a.out, "w") as f:
         json.dump(plan_doc, f, indent=2)
-    print(f"[plan] wrote {a.out}: {len(plan_doc['vods'])} VODs, {len(library)} songs, "
-          f"loop={plan_doc['loop_sec']:.0f}s")
+    synced = sum(1 for v in plan_doc["vods"] for s in v["edl"] if s.get("synced"))
+    print(f"[plan] wrote {a.out}: {len(plan_doc['vods'])} VODs, {len(library)} songs "
+          f"({synced} with song renders), loop={plan_doc['loop_sec']:.0f}s")
 
 
 if __name__ == "__main__":

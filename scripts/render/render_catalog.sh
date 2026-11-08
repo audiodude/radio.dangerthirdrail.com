@@ -3,7 +3,8 @@
 # Renders all entries in a spec JSON through render_piece.sh, then runs make_manifest.py.
 #
 # Spec format: array of objects:
-#   { "model": "...", "preset": "...", "seed": N, "duration_sec": N, "kind": "piece"|"ident" }
+#   { "model": "...", "preset": "...", "seed": N, "duration_sec": N, "kind": "piece"|"ident",
+#     "title": "On-screen credit" (optional) }
 set -euo pipefail
 
 SPEC="${1:?usage: render_catalog.sh <spec.json> <out_dir>}"
@@ -23,9 +24,10 @@ for i in $(seq 0 $((N - 1))); do
     SEED="$(jq -r ".[$i].seed" "$SPEC")"
     DURATION="$(jq -r ".[$i].duration_sec" "$SPEC")"
     KIND="$(jq -r ".[$i].kind // \"piece\"" "$SPEC")"
+    TITLE="$(jq -r ".[$i].title // \"\"" "$SPEC")"
 
     echo "[render_catalog] [$((i+1))/$N] $MODEL/$PRESET seed=$SEED ${DURATION}s kind=$KIND"
-    "$SCRIPT_DIR/render_piece.sh" "$MODEL" "$PRESET" "$SEED" "$DURATION" "$OUT_DIR" --kind "$KIND"
+    "$SCRIPT_DIR/render_piece.sh" "$MODEL" "$PRESET" "$SEED" "$DURATION" "$OUT_DIR" --kind "$KIND" --title "$TITLE"
 done
 
 echo "[render_catalog] all renders done, building manifest..."

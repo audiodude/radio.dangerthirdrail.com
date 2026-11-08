@@ -64,7 +64,7 @@ Pieces come from the [vxstory](https://github.com/audiodude/vxstory) models
 with a GPU and a vxstory checkout (`VXSTORY_DIR`, default `../vxstory`):
 
 ```bash
-# one piece: model, preset, seed, duration, out dir (+ optional --kind ident)
+# one piece: model, preset, seed, duration, out dir (+ optional --kind ident, --title "Credit")
 scripts/render/render_piece.sh supernova_orbit odyssey 101 600 ./catalog_1080
 # a whole catalog from a committable spec (the on-air one is station-1080.json)
 scripts/render/render_catalog.sh scripts/render/specs/station-1080.json ./catalog_1080
@@ -78,18 +78,73 @@ scripts/render/upload_catalog.sh ./catalog_1080 s3://bucket/catalog/
 - Each mp4 gets a sidecar JSON; `make_manifest.py` collects them into
   `catalog.json`: `{"pieces": [{id, kind: piece|ident, model, preset, seed, duration_sec, file, rendered_at}]}`.
   An optional `title` is the piece's on-screen credit (default: the model in Title Case,
-  `Supernova Orbit`). How often pieces air is set in
+  `Supernova Orbit`); set it per entry in the spec (`"title": "Hydra Glass"`) or with
+  `render_piece.sh --title`. How often pieces air is set in
   [`scripts/bake/weights.json`](scripts/bake/weights.json), not the sidecars (see
   **Rotation** below).
 - Renders are serialized (one GPU), idempotent (existing mp4s are skipped, writes are
   atomic), and run about **6× realtime on a 3080 Ti** (~29 min per 300 s piece, encode included).
-- **Hydra** (original Hydra sketches; presets `cells`, `weave`, `glass`, `chrome`, `fold`)
+- **Hydra** (original Hydra sketches; presets `glass`, `fold`, `slices`; spec `hydra.json`)
   renders through vxstory's own `hydra/render.mjs` in headless GPU Chromium instead of
-  Godot. `render_piece.sh` picks it whenever the model dir has a `render.mjs`. One-time
-  setup in the vxstory checkout (Node ≥ 24):
-  `cd hydra && npm ci && npx playwright install chromium-headless-shell`.
+  Godot. `render_piece.sh` picks it whenever the model dir has a `render.mjs`, runs Node
+  from the model dir (so asdf resolves that dir's version) and refuses Node < 24. One-time
+  setup in the vxstory checkout: `cd hydra && npm ci && npx playwright install chromium-headless-shell`.
 
 The next weekly bake picks new pieces up automatically.
+
+### 🎶 Song renders (Hydra, synced to one song)
+
+A **song render** is a Hydra piece made from one song's audio (`render.mjs --audio`), so
+it reacts to that song and only makes sense over it. `render_songs.sh` makes one per
+library song (the bake's denylist excepted), into the same catalog dir as the pieces:
+
+```bash
+aws s3 sync "$S3_MUSIC_BUCKET" ./music --exclude "*" --include "*.mp3"   # the aired files
+scripts/render/render_songs.sh ./music ./catalog_1080   # then upload_catalog.sh as usual
+scripts/render/render_songs.sh ./music ./catalog_1080 --dry-run   # list missing/stale only
+scripts/render/render_songs.sh ./music ./catalog_1080 --jobs 4 --only todo.txt
+# one by hand: duration `song` = the whole song (a number cuts a proof)
+scripts/render/render_piece.sh hydra glass 4242 song ./catalog_1080 --audio ./music/x.mp3
+```
+
+- Each song's preset (`SONG_PRESETS`, default `glass fold slices`) and seed come from a hash
+  of its file name, so new songs never reshuffle old ones. Credit: `Hydra Glass` etc.
+- The sidecar is `kind: "song"` with `song` (file name) and `song_sha256`. Renders must come
+  from the **S3 library copy**: trimming moves a song's start, so any other file drifts.
+  A re-run redoes a render whose song has changed and skips the rest.
+- `--dry-run` prints the songs whose render is missing or stale (no mp4, or the sidecar's
+  `song_sha256` isn't the mp3's) and renders nothing. `--only FILE` limits a run to the file
+  names listed in FILE (one per line). `--jobs K` runs K renders at once (logs interleave);
+  a failed song doesn't stop the others, and the run exits 1 listing it.
+- Throughput is the same as any Hydra render, roughly 4–5× the song's length. A render is
+  bound by per-frame readback, not the GPU, so `--jobs` scales almost linearly (4 at once
+  ≈ 3.7×). Each render parks a ~1 GB/min AVI next to the output until it's encoded.
+
+**On RunPod.** `runpod_songs.py` renders whatever `--dry-run` lists on rented community
+GPUs (RTX 3090 first) and pulls the results into the catalog dir:
+
+```bash
+. ~/.secrets   # RUNPOD_API_KEY
+scripts/render/runpod_songs.py --music-dir ./music --out-dir ./catalog_1080 \
+    --pods 2 --jobs 4 --vxstory ../vxstory
+```
+
+- Nothing pending: no pod. Otherwise the songs are split by duration over `--pods` pods
+  (`radio-songs-<n>`, one thread each). A pod gets Node 24, the Vulkan ICD fix (the host's
+  GLX ICD fails headless; without the fix `render.mjs` refuses SwiftShader), the **local**
+  vxstory `hydra/` (so it renders exactly your sketches), `scripts/render/`, the denylist and
+  only its own mp3s, then runs `render_songs.sh --jobs K --only <its songs>`. Finished mp4s
+  and sidecars are pulled back even when a song fails (the shard is then reported FAILED);
+  `make_manifest.py` rebuilds `catalog.json` locally.
+- It **never uploads**: no AWS credentials go to community hosts. The summary ends with the
+  `upload_catalog.sh` command to run.
+- Every pod it creates is deleted by id on success, error, Ctrl-C, SIGTERM or SIGHUP, and the
+  delete is confirmed (GET → 404). `--keep-on-failure` keeps a failed shard's pod for
+  inspection and prints its id; delete it yourself.
+- Cost: ~7.6 fps per render on a 3090, ~28 fps per pod at `--jobs 4`, so the whole library
+  is roughly **14 pod-hours at $0.22/h (~$3)**, plus each pod's setup (apt, npm, Chromium).
+  The summary prints songs, pod-hours and approximate cost per pod. Disk is sized to
+  `--jobs` AVIs of the longest song plus the shard's mp4s (`--disk-gb` overrides).
 
 ### 🪧 Idents
 
@@ -156,6 +211,11 @@ week's set can always be re-derived.
   marble. A slot only draws a piece long enough for it (the rest stay in the bag for
   later), never the same piece twice in a row, even across VODs and the loop seam. Each
   segment starts at a random in-point. `plan.py --weights` overrides the file.
+- **Song renders**: a song with a song render gets it under the whole song, from its
+  first frame (a silent ident covers the opening), with no cap and no random in-point.
+  Only the songs around it are drawn uncut/cut from the rotation. A render whose song's
+  sha256 no longer matches the library, or that is shorter than the song, is dropped with
+  a log line and the song gets rotation pieces instead.
 - **Titles**: each song's name is burned in as a `♪ Song Title` ASS subtitle that fades in
   and out. The VOD's YouTube title is `Song A / Song B (Render, Render)` (≤ 100 chars:
   every song kept, renders truncated with `...`); the description is the station blurb
@@ -214,6 +274,11 @@ ssh radio-playout 'journalctl -u radio-station-bake -f'
 **Deploys.** The box runs a checkout of the `release` branch in `/opt/radio`: merge `main`
 → `release` (a regular merge, never a squash), push, then `git pull` there. Ship bake
 changes before Wednesday 03:00 PT.
+
+**Disk.** `/data/catalog` is its own 100 GB Hetzner volume (`radio-catalog`, mounted by
+UUID in `/etc/fstab`, `nofail`); sets and music stay on the 150 GB root disk, where the
+bake needs `BAKE_MIN_FREE_GB` (70) free. Grow the volume with `hcloud volume resize`,
+then `resize2fs` on the box.
 
 ## 🧪 Tests
 

@@ -210,3 +210,62 @@ def test_resolve_media_prefers_sibling_of_catalog(tmp_path):
     assert plan.resolve_media("/home/renderbox/out/piece.mp4", str(tmp_path)) == str(local)
     # nothing local -> keep the recorded path (single-machine case)
     assert plan.resolve_media("/elsewhere/gone.mp4", str(tmp_path)) == "/elsewhere/gone.mp4"
+
+
+def _hashed(i, dur=200.0):
+    return {**_song(i, dur), "sha256": f"sha{i}"}
+
+def _song_render(i, dur, sha=None, **kw):
+    return {"src": f"hydra_s{i:03d}.mp4", "dur": dur, "model": "hydra", "title": "Hydra Glass",
+            "song": f"s{i:03d}.mp3", "song_sha256": sha or f"sha{i}", **kw}
+
+
+def test_song_renders_play_over_exactly_their_song():
+    # every other song has a render, plus one 700 s song (past MAX_SEG)
+    lib = [_hashed(i, 150.0 + 11 * (i % 9)) for i in range(40)] + [_hashed(99, 700.0)]
+    renders = [_song_render(i, s["dur"] + 0.02) for i, s in enumerate(lib[:40]) if i % 2 == 0]
+    renders.append(_song_render(99, 700.02))
+    by_song = {r["song"]: r for r in renders}
+    pieces = [_piece(f"p{i}.mp4", 600.0) for i in range(4)]
+    for idents in ([IDENTS[0]], [IDENTS[3]]):              # audio pre-roll, silent overlay
+        p = plan.build_set({"pieces": pieces, "idents": idents, "songs": renders}, lib,
+                           {"seed": 20261113, "swap_at": "x", "fps": 60, "resolution": "1920x1080"})
+        openings = []
+        for v in p["vods"]:
+            t = 0.0
+            for seg in v["edl"]:                            # still contiguous
+                assert abs(seg["tl_start"] - t) < 0.01
+                t = seg["tl_start"] + seg["out"]
+            assert abs(t - v["dur"]) < 0.01
+            vis = v["edl"][0]["out"]
+            for m in v["music"]:
+                over = [s for s in v["edl"][1:] if s["tl_start"] < m["end"] - 1e-6
+                        and s["tl_start"] + s["out"] > m["start"] + 1e-6]
+                r = by_song.get(os.path.basename(m["file"]))
+                if r is None:
+                    assert not any(s.get("synced") or s["src"].startswith("hydra_") for s in over)
+                    continue
+                assert [s["src"] for s in over] == [r["src"]] and over[0]["synced"]
+                a = max(m["start"], vis)
+                assert over[0]["tl_start"] == a and over[0]["in"] == round(a - m["start"], 3)
+                assert abs(over[0]["tl_start"] + over[0]["out"] - m["end"]) < 1e-6
+                openings.append(over[0]["in"])
+                assert "Hydra Glass" in v["description"]
+        assert len(openings) == len(renders)                # every render aired
+        if idents[0].get("audio"):
+            assert set(openings) == {0.0}                   # music starts after the ident
+        else:
+            assert 12.0 in openings                         # ident covers song 1's opening
+
+
+def test_only_fresh_complete_song_renders_are_used():
+    lib = [_hashed(i, 200.0) for i in range(4)]
+    renders = [_song_render(0, 200.02, sha="re-trimmed since"),
+               _song_render(1, 199.0),                      # doesn't cover the song
+               _song_render(2, 200.02),
+               _song_render(3, 200.02, src="old.mp4", rendered_at="2026-11-01T00:00:00Z"),
+               _song_render(3, 200.02, src="new.mp4", rendered_at="2026-11-07T00:00:00Z"),
+               _song_render(9, 300.0)]                      # song not in the library
+    synced = plan.match_song_renders(renders, lib)
+    assert {k: r["src"] for k, r in synced.items()} == {"s002.mp3": "hydra_s002.mp4",
+                                                        "s003.mp3": "new.mp4"}

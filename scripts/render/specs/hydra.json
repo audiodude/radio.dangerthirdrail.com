@@ -1,0 +1,5 @@
+[
+  {"model": "hydra", "preset": "glass",  "seed": 601, "duration_sec": 300, "kind": "piece", "title": "Hydra Glass"},
+  {"model": "hydra", "preset": "fold",   "seed": 602, "duration_sec": 300, "kind": "piece", "title": "Hydra Fold"},
+  {"model": "hydra", "preset": "slices", "seed": 603, "duration_sec": 300, "kind": "piece", "title": "Hydra Slices"}
+]
