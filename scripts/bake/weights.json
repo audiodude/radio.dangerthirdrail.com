@@ -1,0 +1,21 @@
+{
+  "hydra": {
+    "weight": 1,
+    "models": {
+      "hydra": {"weight": 1, "presets": {"cells": 1, "weave": 1, "glass": 1, "chrome": 1, "fold": 1}}
+    }
+  },
+  "godot": {
+    "weight": 1,
+    "default": true,
+    "models": {
+      "chromatic_cascade": {"weight": 1},
+      "fluid_swirl": {"weight": 1},
+      "matter_cycle": {"weight": 1},
+      "metro_rise": {"weight": 1},
+      "peg_cascade": {"weight": 1},
+      "radial_burst": {"weight": 1},
+      "supernova_orbit": {"weight": 1}
+    }
+  }
+}

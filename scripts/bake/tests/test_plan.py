@@ -125,15 +125,40 @@ def test_pieces_never_repeat_across_any_boundary_including_the_loop_seam():
         srcs = _pieces_in_order(p)
         assert all(a != b for a, b in zip(srcs, srcs[1:] + srcs[:1])), seed
 
-def test_piece_weights_set_airtime_share_without_bunching():
-    # hydra at weight 3 among four weight-1 pieces: 3/7 of the picks
-    lib = [_song(i, 150.0) for i in range(300)]
-    pieces = [_piece("hydra.mp4", 600.0, model="hydra", weight=3.0)] + \
-             [_piece(f"p{i}.mp4", 600.0) for i in range(4)]
-    srcs = _pieces_in_order(_set(lib, pieces))
-    assert 0.38 < srcs.count("hydra.mp4") / len(srcs) < 0.48
+def test_bag_draws_exact_shares_per_refill_and_keeps_skipped_marbles():
+    bag = plan.Bag([("a", 2), ("b", 6), ("off", 0)], random.Random(3))
+    for _ in range(5):
+        out = [bag.draw() for _ in range(8)]
+        assert sorted(out) == ["a"] * 2 + ["b"] * 6           # every bag of 8: exactly 2 a's
+    picks = [bag.draw(lambda x: x == "a") for _ in range(2)] + [bag.draw() for _ in range(6)]
+    assert sorted(picks) == ["a"] * 2 + ["b"] * 6             # skipped b's stayed in the bag
+
+WEIGHTS = {"hydra": {"weight": 1, "models": {"hydra": {"presets": {"cells": 3, "fold": 1}}}},
+           "godot": {"weight": 2, "default": True,
+                     "models": {"fluid_swirl": {"weight": 1}, "metro_rise": {"weight": 3}}}}
+
+def test_piece_bags_nest_class_then_model_then_preset():
+    lib = [_song(i, 150.0) for i in range(600)]
+    pieces = [_piece("h_cells_1.mp4", 600.0, "hydra", preset="cells"),
+              _piece("h_cells_2.mp4", 600.0, "hydra", preset="cells"),
+              _piece("h_fold.mp4", 600.0, "hydra", preset="fold"),
+              _piece("fs.mp4", 600.0, "fluid_swirl", preset="aurora"),
+              _piece("mr.mp4", 600.0, "metro_rise", preset="century"),
+              _piece("pc.mp4", 600.0, "peg_cascade", preset="zen")]    # unlisted -> godot
+    srcs = _pieces_in_order(_set(lib, pieces, weights=WEIGHTS))
+    share = lambda *names: sum(srcs.count(n) for n in names) / len(srcs)
+    assert abs(share("h_cells_1.mp4", "h_cells_2.mp4", "h_fold.mp4") - 1 / 3) < 0.04
+    assert abs(share("h_fold.mp4") - 1 / 12) < 0.03            # 1/3 hydra x 1/4 fold
+    assert abs(share("mr.mp4") - 2 / 3 * 3 / 5) < 0.04         # 2/3 godot x 3/5 metro_rise
+    assert abs(share("pc.mp4") - 2 / 3 * 1 / 5) < 0.04         # default class, weight 1
     assert all(a != b for a, b in zip(srcs, srcs[1:] + srcs[:1]))
-    assert max(sum(s == "hydra.mp4" for s in srcs[k:k + 7]) for k in range(len(srcs) - 7)) <= 4
+
+def test_zero_weight_keeps_pieces_off_air():
+    lib = [_song(i, 150.0) for i in range(60)]
+    pieces = [_piece("h.mp4", 600.0, "hydra", preset="cells"),
+              _piece("a.mp4", 600.0), _piece("b.mp4", 600.0, "metro_rise")]
+    w = {"hydra": {"weight": 0, "models": {"hydra": {}}}, "godot": {"default": True}}
+    assert "h.mp4" not in _pieces_in_order(_set(lib, pieces, weights=w))
 
 def test_most_stretches_play_one_piece_when_they_can():
     lib = [_song(i, 150.0) for i in range(300)]

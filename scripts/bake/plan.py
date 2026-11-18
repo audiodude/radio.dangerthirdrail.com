@@ -61,55 +61,112 @@ def stretches(songs: list, rng) -> list[list]:
     return out
 
 
+class Bag:
+    """Marble bag: `weight` marbles per child, shuffled, drawn without
+    replacement. A child is an item or another Bag (a marble that opens a
+    sub-bag). A draw takes the first marble whose child can satisfy `ok`;
+    marbles that can't stay for later draws. When none left can, the rest are
+    dropped and the bag refills. Zero-weight children never come out."""
+
+    def __init__(self, children, rng):
+        self.children = [(c, w) for c, w in children if w > 0]
+        self.rng = rng
+        self.marbles = []
+        self.leaves = [x for c, _ in self.children
+                       for x in (c.leaves if isinstance(c, Bag) else [c])]
+
+    def can(self, ok) -> bool:
+        return any(ok(x) for x in self.leaves)
+
+    def draw(self, ok=lambda x: True):
+        """An item satisfying `ok`, or None if no item ever can."""
+        if not self.can(ok):
+            return None
+        for _ in range(2):
+            for k, c in enumerate(self.marbles):
+                if c.can(ok) if isinstance(c, Bag) else ok(c):
+                    del self.marbles[k]
+                    return c.draw(ok) if isinstance(c, Bag) else c
+            self.marbles = [c for c, w in self.children for _ in range(w)]
+            self.rng.shuffle(self.marbles)
+
+
 def pick_idents(n: int, idents: list[dict], rng) -> list[dict]:
-    """One ident per VOD, by weight. Never the same ident on consecutive VODs,
-    including last -> first around the loop, except a `filler`, which may repeat."""
+    """One ident per VOD, from a marble bag of `weight` marbles each. Never the
+    same ident on consecutive VODs, including last -> first around the loop,
+    except a `filler`, which may repeat."""
     if not idents:
         raise ValueError("the catalog has no idents")
-
-    def draw(avoid):
-        pool = [i for i in idents if i.get("filler") or i["src"] not in avoid] or idents
-        return rng.choices(pool, weights=[float(i.get("weight", 1.0)) for i in pool])[0]
-
+    bag = Bag([(i, int(i.get("weight", 1))) for i in idents], rng)
     out = []
     for k in range(n):
         avoid = {out[-1]["src"]} if out else set()
         if k == n - 1 and n > 1:
             avoid.add(out[0]["src"])
-        out.append(draw(avoid))
+        out.append(bag.draw(lambda i: i.get("filler") or i["src"] not in avoid) or bag.draw())
     return out
 
 
+def _weight(node: dict, where: str) -> int:
+    w = node.get("weight", 1) if isinstance(node, dict) else node
+    if not isinstance(w, int) or isinstance(w, bool) or w < 0:
+        raise ValueError(f"weights {where}: weight must be a whole number >= 0, got {w!r}")
+    return w
+
+
+def piece_bag(pieces: list[dict], weights: dict, rng) -> Bag:
+    """Nested bags: class (e.g. hydra vs godot) -> model -> preset -> piece.
+    `weights` (weights.json): {class: {weight, default?, models: {model:
+    {weight, presets: {preset: weight}}}}}. Unlisted models join the `default`
+    class; any weight left out is 1."""
+    default = [c for c, v in weights.items() if v.get("default")]
+    if len(default) != 1:
+        raise ValueError(f"weights: need exactly one default class, got {default}")
+    home = {}
+    for c, v in weights.items():
+        for m in v.get("models", {}):
+            if m in home:
+                raise ValueError(f"weights: model {m} is in both {home[m]} and {c}")
+            home[m] = c
+    tree = {}
+    for p in sorted(pieces, key=lambda p: p["src"]):
+        c = home.get(p["model"], default[0])
+        tree.setdefault(c, {}).setdefault(p["model"], {}).setdefault(p.get("preset", ""), []).append(p)
+    classes = []
+    for c in sorted(tree):
+        cw = weights.get(c, {})
+        models = []
+        for m in sorted(tree[c]):
+            mw = cw.get("models", {}).get(m, {})
+            presets = [(Bag([(p, 1) for p in tree[c][m][s]], rng),
+                        _weight(mw.get("presets", {}).get(s, 1), f"{c}/{m}/{s}"))
+                       for s in sorted(tree[c][m])]
+            models.append((Bag(presets, rng), _weight(mw, f"{c}/{m}")))
+        classes.append((Bag(models, rng), _weight(cw, c)))
+    bag = Bag(classes, rng)
+    if not bag.leaves:
+        raise ValueError("weights leave no piece to play")
+    return bag
+
+
 class Rotation:
-    """Pieces by due time; never the piece just shown. A piece is due again
-    `total weight / its weight` picks after it last played, so a piece's share of
-    picks follows its `weight` (default 1). With equal weights this is plain
-    least-recently-used, starting from the given order."""
+    """Pieces from the nested marble bag; never the piece just shown."""
 
-    def __init__(self, pieces):
-        self.pieces = list(pieces)
-        self.total = sum(self._w(p) for p in self.pieces)
-        self.due = {p["src"]: k - len(self.pieces) for k, p in enumerate(self.pieces)}
-        self.tick = 0
+    def __init__(self, bag: Bag):
+        self.bag = bag
         self.last = None
-        self.longest = max(p["dur"] for p in pieces)
-
-    @staticmethod
-    def _w(piece):
-        return float(piece.get("weight", 1.0))
+        self.longest = max(p["dur"] for p in bag.leaves)
 
     def take(self, length, avoid=()):
-        """Most-due piece covering `length`, not the last one shown nor `avoid`;
-        None if no piece is long enough."""
-        fits = sorted((p for p in self.pieces if p["dur"] >= length - 1e-6),
-                      key=lambda p: self.due[p["src"]])
-        if not fits:
-            return None
-        piece = next((p for p in fits if p["src"] != self.last and p["src"] not in avoid),
-                     next((p for p in fits if p["src"] != self.last), fits[0]))
-        self.due[piece["src"]] = self.tick + self.total / self._w(piece)
-        self.tick += 1
-        self.last = piece["src"]
+        """A piece covering `length`, not the last one shown nor `avoid` if
+        possible; None if no piece is long enough."""
+        def fits(p):
+            return p["dur"] >= length - 1e-6
+        piece = (self.bag.draw(lambda p: fits(p) and p["src"] != self.last and p["src"] not in avoid)
+                 or self.bag.draw(lambda p: fits(p) and p["src"] != self.last)
+                 or self.bag.draw(fits))
+        if piece is not None:
+            self.last = piece["src"]
         return piece
 
 
@@ -210,7 +267,7 @@ def _sha(parts) -> str:
 
 def build_set(catalog: dict, library: list[dict], config: dict) -> dict:
     """`config`: seed, swap_at, fps, resolution, blurb (optional),
-    uncut_share (optional)."""
+    uncut_share (optional), weights (optional, see `piece_bag`)."""
     seed = int(config["seed"])
     blurb = config.get("blurb", "")
     uncut_share = float(config.get("uncut_share", UNCUT_SHARE))
@@ -220,9 +277,9 @@ def build_set(catalog: dict, library: list[dict], config: dict) -> dict:
     groups = stretches(songs, random.Random(f"stretch:{seed}"))
     idents = pick_idents(len(groups), catalog["idents"], random.Random(f"ident:{seed}"))
 
-    pieces = sorted(catalog["pieces"], key=lambda p: p["src"])
-    random.Random(f"pieces:{seed}").shuffle(pieces)
-    rot = Rotation(pieces)
+    pieces = catalog["pieces"]
+    weights = config.get("weights") or {"all": {"default": True}}
+    rot = Rotation(piece_bag(pieces, weights, random.Random(f"pieces:{seed}")))
     rng = random.Random(f"edl:{seed}")
     names = {p["src"]: render_name(p) for p in pieces}
 
@@ -259,9 +316,10 @@ def resolve_media(entry_file: str, catalog_dir: str) -> str:
 
 
 def _load_catalog(path: str) -> dict:
-    """Pieces keep `model` and an optional `title` (their credit). Pieces and
-    idents may carry `weight` (relative draw odds, default 1); idents also
-    `filler` (may open two VODs in a row). Whether an ident has audio is probed."""
+    """Pieces keep `model`, `preset` and an optional `title` (their credit).
+    Idents may carry `weight` (marbles in the ident bag, a whole number,
+    default 1) and `filler` (may open two VODs in a row). Whether an ident has
+    audio is probed. Piece weights live in weights.json, not sidecars."""
     with open(path) as f:
         data = json.load(f)
     here = os.path.dirname(os.path.abspath(path))
@@ -271,22 +329,24 @@ def _load_catalog(path: str) -> dict:
         if key is None:
             continue
         f_path = resolve_media(e["file"], here)
-        weight = float(e.get("weight", 1.0))
-        if weight <= 0:
-            raise ValueError(f"{e['kind']} {e['file']}: weight must be > 0, got {weight}")
-        item = {"src": f_path, "dur": ffprobe_duration(f_path), "weight": weight}
+        item = {"src": f_path, "dur": ffprobe_duration(f_path)}
         if key == "pieces":
-            item.update(model=e.get("model", os.path.splitext(os.path.basename(f_path))[0]))
+            item.update(model=e.get("model", os.path.splitext(os.path.basename(f_path))[0]),
+                        preset=e.get("preset", ""))
             if e.get("title"):
                 item["title"] = e["title"]
         else:
-            item.update(filler=bool(e.get("filler", False)),
+            weight = e.get("weight", 1)
+            if weight != int(weight) or weight <= 0:
+                raise ValueError(f"ident {e['file']}: weight must be a whole number > 0, got {weight}")
+            item.update(weight=int(weight), filler=bool(e.get("filler", False)),
                         audio=ffprobe_has_audio(f_path))
         out[key].append(item)
     return out
 
 
 DENYLIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), "song_denylist.txt")
+WEIGHTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights.json")
 
 
 def load_denylist(path: str) -> set[str]:
@@ -314,14 +374,17 @@ def main():
     ap.add_argument("--resolution", default="1920x1080")
     ap.add_argument("--blurb-file", default="", help="text opening every VOD description")
     ap.add_argument("--denylist", default=DENYLIST)
+    ap.add_argument("--weights", default=WEIGHTS, help="piece marble-bag weights")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
 
     denied = load_denylist(a.denylist)
     library = load_library(a.library_dir, denied)
     blurb = open(a.blurb_file).read() if a.blurb_file and os.path.exists(a.blurb_file) else ""
+    with open(a.weights) as f:
+        weights = json.load(f)
     cfg = {"seed": a.seed, "swap_at": a.swap_at, "fps": a.fps,
-           "resolution": a.resolution, "blurb": blurb}
+           "resolution": a.resolution, "blurb": blurb, "weights": weights}
     plan_doc = build_set(_load_catalog(a.catalog), library, cfg)
     with open(a.out, "w") as f:
         json.dump(plan_doc, f, indent=2)

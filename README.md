@@ -78,9 +78,9 @@ scripts/render/upload_catalog.sh ./catalog_1080 s3://bucket/catalog/
 - Each mp4 gets a sidecar JSON; `make_manifest.py` collects them into
   `catalog.json`: `{"pieces": [{id, kind: piece|ident, model, preset, seed, duration_sec, file, rendered_at}]}`.
   An optional `title` is the piece's on-screen credit (default: the model in Title Case,
-  `Supernova Orbit`). An optional `weight` (default `1`, must be > 0) sets how often the
-  piece airs relative to the others, like ident weights: e.g. `"weight": 2` on each hydra
-  sidecar plays each hydra piece about twice as often as the rest.
+  `Supernova Orbit`). How often pieces air is set in
+  [`scripts/bake/weights.json`](scripts/bake/weights.json), not the sidecars (see
+  **Rotation** below).
 - Renders are serialized (one GPU), idempotent (existing mp4s are skipped, writes are
   atomic), and run about **6× realtime on a 3080 Ti** (~29 min per 300 s piece, encode included).
 - **Hydra** (original Hydra sketches; presets `cells`, `weave`, `glass`, `chrome`, `fold`)
@@ -99,7 +99,7 @@ can be anything, e.g. `handmade`). Optional sidecar fields steer the bake:
 
 | Field | Effect |
 |---|---|
-| `weight` | Relative odds of opening a VOD (default `1`) |
+| `weight` | Marbles in the ident bag, a whole number (default `1`) |
 | `filler: true` | May open two VODs in a row (`text_ident_plz_ignore_s1` is the filler, weight 6) |
 
 An ident **with audio** is pre-roll: it plays with its own sound, then the first song
@@ -131,7 +131,10 @@ week's set can always be re-derived.
   week). `bake.sh --now` bakes a launch set that swaps in as soon as it's uploaded.
 - **Songs**: the whole library in a seeded shuffle, each song **exactly once**, cut into
   **stretches of 2 or 3 songs**, one VOD each.
-- **Idents**: one per VOD, drawn by weight, never the same one on two VODs in a row (the
+- **Marble bags**: idents and pieces are drawn from shuffled *marble bags*: an item with
+  weight 3 puts 3 marbles in the bag, draws don't put them back, and an empty bag refills.
+  So shares are exact per bag and nothing streaks the way independent dice rolls do.
+- **Idents**: one per VOD from the ident bag, never the same one on two VODs in a row (the
   filler excepted), including from the last VOD back to the first.
 - **Uncut vs cut**: each stretch is drawn **uncut** (75%, `UNCUT_SHARE` in
   `scripts/bake/plan.py`), one piece under every song, which is what the 600 s pieces are
@@ -139,11 +142,20 @@ week's set can always be re-derived.
   long enough; otherwise it's cut.
 - **10-minute cap**: no piece stays on screen longer than `MAX_SEG` (600 s). A longer
   stretch is always cut, and a song that would still outrun the cap cuts mid-song.
-- **Rotation**: pieces go by due time across the whole set: a piece is due again
-  `total weight / its weight` picks after it last played, so equal weights are plain
-  least-recently-used and a `weight` of 2 airs twice as often, evenly spread. Never the
-  same piece twice in a row, even across VODs and the loop seam. Each segment starts at a
-  random in-point.
+- **Rotation**: pieces come from nested bags, **class → model → preset → piece**, weighted
+  by [`scripts/bake/weights.json`](scripts/bake/weights.json):
+
+  ```json
+  {"hydra": {"weight": 1, "models": {"hydra": {"weight": 1, "presets": {"cells": 1, "fold": 1}}}},
+   "godot": {"weight": 3, "default": true, "models": {"metro_rise": {"weight": 2}}}}
+  ```
+
+  Here hydra gets 1 draw in 4 and godot 3, then metro_rise gets 2 of godot's model marbles
+  to every other model's 1. Weights are whole numbers; anything left out is `1`, `0` takes
+  it off air. Models not listed go to the `default` class. Every piece of a preset gets one
+  marble. A slot only draws a piece long enough for it (the rest stay in the bag for
+  later), never the same piece twice in a row, even across VODs and the loop seam. Each
+  segment starts at a random in-point. `plan.py --weights` overrides the file.
 - **Titles**: each song's name is burned in as a `♪ Song Title` ASS subtitle that fades in
   and out. The VOD's YouTube title is `Song A / Song B (Render, Render)` (≤ 100 chars:
   every song kept, renders truncated with `...`); the description is the station blurb
