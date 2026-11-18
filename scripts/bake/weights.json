@@ -6,7 +6,7 @@
     }
   },
   "godot": {
-    "weight": 1,
+    "weight": 2,
     "default": true,
     "models": {
       "chromatic_cascade": {"weight": 1},
