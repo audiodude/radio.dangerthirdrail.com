@@ -81,23 +81,34 @@ def pick_idents(n: int, idents: list[dict], rng) -> list[dict]:
 
 
 class Rotation:
-    """Pieces least-recently-used first; never the piece just shown."""
+    """Pieces by due time; never the piece just shown. A piece is due again
+    `total weight / its weight` picks after it last played, so a piece's share of
+    picks follows its `weight` (default 1). With equal weights this is plain
+    least-recently-used, starting from the given order."""
 
     def __init__(self, pieces):
-        self.queue = list(pieces)
+        self.pieces = list(pieces)
+        self.total = sum(self._w(p) for p in self.pieces)
+        self.due = {p["src"]: k - len(self.pieces) for k, p in enumerate(self.pieces)}
+        self.tick = 0
         self.last = None
         self.longest = max(p["dur"] for p in pieces)
 
+    @staticmethod
+    def _w(piece):
+        return float(piece.get("weight", 1.0))
+
     def take(self, length, avoid=()):
-        """LRU piece covering `length`, not the last one shown nor `avoid`;
+        """Most-due piece covering `length`, not the last one shown nor `avoid`;
         None if no piece is long enough."""
-        fits = [p for p in self.queue if p["dur"] >= length - 1e-6]
+        fits = sorted((p for p in self.pieces if p["dur"] >= length - 1e-6),
+                      key=lambda p: self.due[p["src"]])
         if not fits:
             return None
         piece = next((p for p in fits if p["src"] != self.last and p["src"] not in avoid),
                      next((p for p in fits if p["src"] != self.last), fits[0]))
-        self.queue.remove(piece)
-        self.queue.append(piece)
+        self.due[piece["src"]] = self.tick + self.total / self._w(piece)
+        self.tick += 1
         self.last = piece["src"]
         return piece
 
@@ -248,9 +259,9 @@ def resolve_media(entry_file: str, catalog_dir: str) -> str:
 
 
 def _load_catalog(path: str) -> dict:
-    """Pieces keep `model` and an optional `title` (their credit). Idents may
-    carry `weight` (relative draw odds, default 1) and `filler` (may open two
-    VODs in a row). Whether an ident has audio is probed."""
+    """Pieces keep `model` and an optional `title` (their credit). Pieces and
+    idents may carry `weight` (relative draw odds, default 1); idents also
+    `filler` (may open two VODs in a row). Whether an ident has audio is probed."""
     with open(path) as f:
         data = json.load(f)
     here = os.path.dirname(os.path.abspath(path))
@@ -260,16 +271,16 @@ def _load_catalog(path: str) -> dict:
         if key is None:
             continue
         f_path = resolve_media(e["file"], here)
-        item = {"src": f_path, "dur": ffprobe_duration(f_path)}
+        weight = float(e.get("weight", 1.0))
+        if weight <= 0:
+            raise ValueError(f"{e['kind']} {e['file']}: weight must be > 0, got {weight}")
+        item = {"src": f_path, "dur": ffprobe_duration(f_path), "weight": weight}
         if key == "pieces":
             item.update(model=e.get("model", os.path.splitext(os.path.basename(f_path))[0]))
             if e.get("title"):
                 item["title"] = e["title"]
         else:
-            weight = float(e.get("weight", 1.0))
-            if weight <= 0:
-                raise ValueError(f"ident {e['file']}: weight must be > 0, got {weight}")
-            item.update(weight=weight, filler=bool(e.get("filler", False)),
+            item.update(filler=bool(e.get("filler", False)),
                         audio=ffprobe_has_audio(f_path))
         out[key].append(item)
     return out

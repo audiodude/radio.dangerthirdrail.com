@@ -78,7 +78,9 @@ scripts/render/upload_catalog.sh ./catalog_1080 s3://bucket/catalog/
 - Each mp4 gets a sidecar JSON; `make_manifest.py` collects them into
   `catalog.json`: `{"pieces": [{id, kind: piece|ident, model, preset, seed, duration_sec, file, rendered_at}]}`.
   An optional `title` is the piece's on-screen credit (default: the model in Title Case,
-  `Supernova Orbit`).
+  `Supernova Orbit`). An optional `weight` (default `1`, must be > 0) sets how often the
+  piece airs relative to the others, like ident weights: e.g. `"weight": 2` on each hydra
+  sidecar plays each hydra piece about twice as often as the rest.
 - Renders are serialized (one GPU), idempotent (existing mp4s are skipped, writes are
   atomic), and run about **6× realtime on a 3080 Ti** (~29 min per 300 s piece, encode included).
 - **Hydra** (original Hydra sketches; presets `cells`, `weave`, `glass`, `chrome`, `fold`)
@@ -137,8 +139,11 @@ week's set can always be re-derived.
   long enough; otherwise it's cut.
 - **10-minute cap**: no piece stays on screen longer than `MAX_SEG` (600 s). A longer
   stretch is always cut, and a song that would still outrun the cap cuts mid-song.
-- **Rotation**: pieces go least-recently-used across the whole set and never play twice in
-  a row, even across VODs and the loop seam. Each segment starts at a random in-point.
+- **Rotation**: pieces go by due time across the whole set: a piece is due again
+  `total weight / its weight` picks after it last played, so equal weights are plain
+  least-recently-used and a `weight` of 2 airs twice as often, evenly spread. Never the
+  same piece twice in a row, even across VODs and the loop seam. Each segment starts at a
+  random in-point.
 - **Titles**: each song's name is burned in as a `♪ Song Title` ASS subtitle that fades in
   and out. The VOD's YouTube title is `Song A / Song B (Render, Render)` (≤ 100 chars:
   every song kept, renders truncated with `...`); the description is the station blurb

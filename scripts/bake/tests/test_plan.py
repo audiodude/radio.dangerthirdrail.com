@@ -125,6 +125,16 @@ def test_pieces_never_repeat_across_any_boundary_including_the_loop_seam():
         srcs = _pieces_in_order(p)
         assert all(a != b for a, b in zip(srcs, srcs[1:] + srcs[:1])), seed
 
+def test_piece_weights_set_airtime_share_without_bunching():
+    # hydra at weight 3 among four weight-1 pieces: 3/7 of the picks
+    lib = [_song(i, 150.0) for i in range(300)]
+    pieces = [_piece("hydra.mp4", 600.0, model="hydra", weight=3.0)] + \
+             [_piece(f"p{i}.mp4", 600.0) for i in range(4)]
+    srcs = _pieces_in_order(_set(lib, pieces))
+    assert 0.38 < srcs.count("hydra.mp4") / len(srcs) < 0.48
+    assert all(a != b for a, b in zip(srcs, srcs[1:] + srcs[:1]))
+    assert max(sum(s == "hydra.mp4" for s in srcs[k:k + 7]) for k in range(len(srcs) - 7)) <= 4
+
 def test_most_stretches_play_one_piece_when_they_can():
     lib = [_song(i, 150.0) for i in range(300)]
     p = _set(lib, [_piece(f"p{i}.mp4", 600.0) for i in range(4)])
