@@ -81,6 +81,26 @@ STOP = threading.Event()
 PROCS = set()
 LOCK = threading.Lock()     # log lines and PROCS
 R_AWS = "/root/aws.env"   # the run's scoped STS credentials
+R_UPLOAD = "/root/upload.sh"
+
+
+def upload_pass(s3):
+    """One upload pass on a pod. Sidecars are listed BEFORE the mp4 sync and only
+    those go up after it: render_piece.sh writes a sidecar only once its mp4 is in
+    place, so every sidecar on S3 (what marks a render done) has its mp4 there.
+    Half-written *.mp4.tmp and the pod's catalog.json never go up."""
+    return f"""set -euo pipefail
+set -a; . {R_AWS}; set +a
+cd {R_OUT}
+inc=()
+for f in *.json; do
+    [[ -e "$f" && "$f" != catalog.json ]] && inc+=(--include "$f")
+done
+aws s3 sync . {s3}/ --only-show-errors --exclude '*' --include '*.mp4'
+if (( ${{#inc[@]}} )); then
+    aws s3 sync . {s3}/ --only-show-errors --exclude '*' "${{inc[@]}}"
+fi
+"""
 
 
 def log(msg, tag="runpod_songs"):
@@ -328,15 +348,22 @@ class Pod:
         self.rsync(f"--files-from={lst}", f"{self.args.music_dir}/", self.remote(f"{R_MUSIC}/"))
 
     def render(self):
-        """Start render_songs.sh detached (an SSH drop can't kill it), follow its
-        log, and return its exit code."""
-        job = (f"echo $$ > {R_PID}; cd {R_REPO} && VXSTORY_DIR={R_VXSTORY} "
+        """Start render_songs.sh detached (an SSH drop can't kill it), with an
+        uploader beside it that pushes finished renders to S3 every 2 min, so a
+        dead pod (or an empty RunPod balance) loses at most the renders in flight.
+        Follow the log and return render_songs.sh's exit code."""
+        self.ssh(f"printf %s {shlex.quote(upload_pass(self.args.s3))} > {R_UPLOAD}")
+        job = (f"echo $$ > {R_PID}; "
+               f"(while [ ! -s {R_RC} ]; do bash {R_UPLOAD} >> /root/upload.log 2>&1; "
+               f"sleep 120; done) & "
+               f"cd {R_REPO} && VXSTORY_DIR={R_VXSTORY} "
                f"scripts/render/render_songs.sh {R_MUSIC} {R_OUT} --jobs {self.args.jobs} "
                f"--only {R_ONLY} > {R_LOG} 2>&1; echo $? > {R_RC}")
         self.ssh(f"rm -f {R_RC} {R_PID}; touch {R_LOG}; "
                  f"nohup setsid bash -c {shlex.quote(job)} >/dev/null 2>&1 < /dev/null & "
                  f"for i in $(seq 100); do [ -s {R_PID} ] && exit 0; sleep 0.1; done; exit 1")
-        log(f"rendering {len(self.songs)} songs, --jobs {self.args.jobs}", self.tag)
+        log(f"rendering {len(self.songs)} songs, --jobs {self.args.jobs}, "
+            f"uploading as they finish", self.tag)
         seen = 0
         while True:
             # tail exits once the render's shell does; resume where it left off
@@ -356,13 +383,8 @@ class Pod:
             time.sleep(10)
 
     def upload(self):
-        """mp4s first, sidecars after: a sidecar on S3 (what marks a song done)
-        always has its mp4. Half-written *.mp4.tmp and the pod's catalog.json stay."""
-        s3 = self.args.s3
-        self.ssh(f"set -euo pipefail; set -a; . {R_AWS}; set +a; "
-                 f"aws s3 sync {R_OUT}/ {s3}/ --only-show-errors --exclude '*' --include '*.mp4'; "
-                 f"aws s3 sync {R_OUT}/ {s3}/ --only-show-errors --exclude '*' --include '*.json' "
-                 f"--exclude catalog.json")
+        """The final upload pass (the same one the uploader runs every 2 min)."""
+        self.ssh(f"bash {R_UPLOAD}")
         self.uploaded = True
 
     def thread(self):
