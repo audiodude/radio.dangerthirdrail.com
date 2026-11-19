@@ -1,17 +1,22 @@
 #!/usr/bin/env bash
 # render_songs.sh <music_dir> <out_dir> [--jobs K] [--only FILE] [--dry-run]
-# One song render per library mp3 (minus the bake's denylist), synced to that
-# song, then rebuilds the manifest. <music_dir> must hold the exact files the
-# bake airs: a mirror of S3_MUSIC_BUCKET. Each song's preset and seed come from
-# a hash of its file name, so adding songs never reshuffles the others.
+# SONG_VERSIONS (3) song renders per library mp3 (minus the bake's denylist),
+# each a different sketch, synced to that song; then rebuilds the manifest.
+# <music_dir> must hold the exact files the bake airs: a mirror of
+# S3_MUSIC_BUCKET. A song's sketches are the SONG_VERSIONS presets ranking
+# highest by hash(song, preset) (rendezvous hashing), with a seed from the same
+# hash: adding songs never touches others, and adding a sketch only moves the
+# songs that now rank it in their top SONG_VERSIONS.
 #
 # --jobs K    K renders at once (default 1; their logs interleave). A failed
-#             song doesn't stop the others; the run exits 1 at the end.
+#             song doesn't stop the others; the run exits 1 at the end. A song
+#             is one unit of work: all its versions render in the same slot.
 # --only FILE render only the song file names listed in FILE, one per line.
-# --dry-run   print the songs whose render is missing or stale (no mp4, or the
-#             sidecar's song_sha256 isn't the mp3's), one per line; render nothing.
+# --dry-run   print the songs with any version missing or stale (no sidecar, or its
+#             song_sha256 isn't the mp3's), one per line; render nothing.
 #
-# Env: SONG_MODEL (hydra), SONG_PRESETS (the ten sketches below), plus
+# Env: SONG_MODEL (hydra), SONG_PRESETS (the ten sketches below), SONG_VERSIONS
+# (3), plus
 # render_piece.sh's (VXSTORY_DIR, RENDER_RES, RENDER_TMPDIR).
 set -euo pipefail
 
@@ -33,8 +38,10 @@ OUT_DIR="${ARGS[1]}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DENYLIST="$SCRIPT_DIR/../bake/song_denylist.txt"
 MODEL="${SONG_MODEL:-hydra}"
-# Changing this list reassigns songs to presets, so they re-render: append, don't reorder.
 read -r -a PRESETS <<< "${SONG_PRESETS:-babylon_tile fold glass halftone hex_tunnel mandala organ_pipes slices third_eye tiger}"
+VERSIONS="${SONG_VERSIONS:-3}"
+[[ "$VERSIONS" =~ ^[1-9][0-9]*$ ]] && (( VERSIONS <= ${#PRESETS[@]} )) \
+    || { echo "SONG_VERSIONS must be 1..${#PRESETS[@]}" >&2; exit 1; }
 
 # --dry-run's stdout is the song list only; progress goes to stderr
 if (( DRY_RUN )); then exec 3>&2; else exec 3>&1; fi
@@ -52,15 +59,16 @@ fi
 [[ ${#SONGS[@]} -gt 0 ]] || { echo "no mp3s in $MUSIC_DIR" >&2; exit 1; }
 log "${#SONGS[@]} songs in $MUSIC_DIR -> $OUT_DIR (${PRESETS[*]})"
 
-# assign <song>: sets preset, seed, title (from a hash of the file name)
-assign() {
-    local h
-    h="$(printf '%s' "$1" | sha256sum)"
-    preset="${PRESETS[$(( 16#${h:0:8} % ${#PRESETS[@]} ))]}"
-    seed=$(( 16#${h:8:6} % 9000 + 1000 ))
-    local words
-    read -r -a words <<< "${preset//_/ }"
-    title="${MODEL^} ${words[*]^}"                  # hex_tunnel -> Hydra Hex Tunnel
+# versions <song>: "preset seed title" lines, one per version
+versions() {
+    local p h words
+    for p in "${PRESETS[@]}"; do
+        h="$(printf '%s\0%s' "$1" "$p" | sha256sum)"
+        echo "${h:0:12} $p $(( 16#${h:12:6} % 9000 + 1000 ))"
+    done | sort -r | head -n "$VERSIONS" | while read -r _ p seed; do
+        read -r -a words <<< "${p//_/ }"
+        echo "$p $seed ${MODEL^} ${words[*]^}"     # hex_tunnel -> Hydra Hex Tunnel
+    done
 }
 
 TODO=()
@@ -71,13 +79,16 @@ for i in "${!SONGS[@]}"; do
         continue
     fi
     if (( DRY_RUN )); then
-        # Same up-to-date test as render_piece.sh's skip
-        assign "$song"
-        out="$OUT_DIR/${MODEL}_${preset}_s${seed}_${song%.*}"
+        # By sidecar alone: render_piece.sh writes it after the mp4, and runpod_songs.py
+        # uploads it after the mp4, so <out_dir> can be a mirror of S3's sidecars only
         sha="$(sha256sum "$MUSIC_DIR/$song" | cut -d' ' -f1)"
-        if [[ ! -f "$out.mp4" ]] || [[ "$(jq -r '.song_sha256 // ""' "$out.json" 2>/dev/null)" != "$sha" ]]; then
-            echo "$song"
-        fi
+        while read -r preset seed _; do
+            out="$OUT_DIR/${MODEL}_${preset}_s${seed}_${song%.*}"
+            if [[ "$(jq -r '.song_sha256 // ""' "$out.json" 2>/dev/null)" != "$sha" ]]; then
+                echo "$song"
+                break
+            fi
+        done < <(versions "$song")
         continue
     fi
     TODO+=("$((i+1))" "$song")
@@ -87,18 +98,20 @@ done
 FAILED="$(mktemp)"
 trap 'rm -f "$FAILED"' EXIT
 render_one() {
-    local song="$2" preset seed title
-    assign "$song"
-    echo "[render_songs] [$1/$N_SONGS] $song: $MODEL/$preset seed=$seed"
-    if ! "$SCRIPT_DIR/render_piece.sh" "$MODEL" "$preset" "$seed" song "$OUT_DIR" \
-            --audio "$MUSIC_DIR/$song" --title "$title"; then
+    local song="$2" preset seed title bad=0
+    while read -r preset seed title; do
+        echo "[render_songs] [$1/$N_SONGS] $song: $MODEL/$preset seed=$seed"
+        "$SCRIPT_DIR/render_piece.sh" "$MODEL" "$preset" "$seed" song "$OUT_DIR" \
+            --audio "$MUSIC_DIR/$song" --title "$title" </dev/null || bad=1
+    done < <(versions "$song")
+    if (( bad )); then
         echo "[render_songs] FAILED: $song" >&2
         echo "$song" >> "$FAILED"
         return 1
     fi
 }
-export -f render_one assign
-export MODEL MUSIC_DIR OUT_DIR SCRIPT_DIR FAILED N_SONGS="${#SONGS[@]}" PRESETS_STR="${PRESETS[*]}"
+export -f render_one versions
+export MODEL MUSIC_DIR OUT_DIR SCRIPT_DIR FAILED VERSIONS N_SONGS="${#SONGS[@]}" PRESETS_STR="${PRESETS[*]}"
 # Arrays don't export; the child rebuilds PRESETS from PRESETS_STR.
 # xargs exits 123 when some song failed (listed in $FAILED); anything else is fatal.
 if [[ ${#TODO[@]} -gt 0 ]]; then

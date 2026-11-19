@@ -1,23 +1,28 @@
 #!/usr/bin/env python3
-"""runpod_songs.py --music-dir DIR --out-dir DIR [--pods N] [--jobs K] ...
+"""runpod_songs.py --music-dir DIR [--s3 URI] [--pods N] [--jobs K] ...
 
-Renders the library's missing or stale song renders on rented RunPod GPUs.
+Renders the library's missing or stale song renders on rented RunPod GPUs and
+uploads them straight from the pods to the S3 catalog.
 
-The pending songs are `render_songs.sh --dry-run` run locally; with none, no pod
-is created. They are split by duration over min(N, pending) community pods
-(`radio-songs-<n>`), one thread per pod. Each pod gets the LOCAL vxstory
-`hydra/` (so it renders exactly the local sketches), this repo's
-`scripts/render/` and the bake's denylist, and only its own mp3s; it runs
-`render_songs.sh --jobs K --only <its songs>`, and the finished mp4s + sidecars
-are pulled back into --out-dir. make_manifest.py then rebuilds catalog.json
-locally. Nothing is uploaded and no AWS credentials go to the pods: community
-hosts are third-party machines. Upload with upload_catalog.sh afterwards.
+The pending songs come from `render_songs.sh --dry-run` against the song
+sidecars already on S3; with none, no pod is created. They are split by
+duration over min(N, pending) community pods (`radio-songs-<n>`), one thread
+per pod. Each pod gets the LOCAL vxstory `hydra/` (so it renders exactly the
+local sketches), this repo's `scripts/render/` and the bake's denylist, and
+only its own mp3s; it runs `render_songs.sh --jobs K --only <its songs>`, then
+syncs its mp4s, then their sidecars, to --s3. Finally catalog.json on S3 is
+rebuilt: its non-song entries plus every song sidecar there.
+
+Community hosts are third-party machines, so pods never see the local AWS
+keys: each run mints an STS federation token (36 h) that can only list and put
+objects under the --s3 prefix.
 
 Every pod this run creates is deleted by id on success, error, Ctrl-C and
 SIGTERM/SIGHUP. --keep-on-failure keeps the pods whose shard failed (ids
 printed) so they can be inspected; delete them by hand afterwards.
 
-Env: RUNPOD_API_KEY (required), VXSTORY_DIR (default for --vxstory).
+Env: RUNPOD_API_KEY (required), S3_CATALOG_URI (default for --s3), VXSTORY_DIR
+(default for --vxstory), local AWS credentials of an IAM user.
 """
 import argparse
 import json
@@ -37,8 +42,8 @@ from pathlib import Path
 API = "https://api.runpod.io/v2"  # v1 (rest.runpod.io) is gone: NXDOMAIN since Nov 2026
 USER_AGENT = "radio-songs/1"  # urllib's default UA gets a Cloudflare 403 (1010)
 IMAGE = "runpod/base:2.0.0-ubuntu2404"  # has ffmpeg + git
-GPUS = ["NVIDIA GeForce RTX 3090", "NVIDIA RTX A4000", "NVIDIA RTX A5000",
-        "NVIDIA GeForce RTX 4090"]
+# A4000s rendered ~5x slower than a 3090 (2-3.5 vs 15 fps per render), so they're out
+GPUS = ["NVIDIA GeForce RTX 3090", "NVIDIA GeForce RTX 4090"]
 REPO = Path(__file__).resolve().parents[2]
 RENDER_DIR = REPO / "scripts" / "render"
 DENYLIST = REPO / "scripts" / "bake" / "song_denylist.txt"
@@ -51,7 +56,9 @@ SETUP_BASE = r"""
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq rsync jq ca-certificates curl >/dev/null
+apt-get install -y -qq rsync jq ca-certificates curl unzip >/dev/null
+curl -fsSL https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip -o /tmp/awscli.zip
+unzip -q -o /tmp/awscli.zip -d /tmp && /tmp/aws/install --update >/dev/null
 curl -fsSL https://deb.nodesource.com/setup_24.x | bash - >/dev/null
 apt-get install -y -qq nodejs >/dev/null
 # Vulkan ICD fix: the host-mounted GLX ICD fails headless (render.mjs would fall
@@ -73,7 +80,7 @@ npx playwright install --with-deps chromium-headless-shell >/dev/null
 STOP = threading.Event()
 PROCS = set()
 LOCK = threading.Lock()     # log lines and PROCS
-REWRITE = threading.Lock()  # sidecar path rewrites in --out-dir
+R_AWS = "/root/aws.env"   # the run's scoped STS credentials
 
 
 def log(msg, tag="runpod_songs"):
@@ -82,6 +89,10 @@ def log(msg, tag="runpod_songs"):
 
 
 class Aborted(Exception):
+    pass
+
+
+class NoDirectSSH(Exception):
     pass
 
 
@@ -143,13 +154,15 @@ class Pod:
         self.host = self.port = None
         self.error = None
         self.rendered = 0
-        self.pulled = False
+        self.uploaded = False
+        self.prior_hours = 0.0   # replaced pods (no public SSH) still cost
 
     # --- lifecycle -----------------------------------------------------------
     def create(self, disk_gb, pubkey):
+        self.disk_gb, self.pubkey = disk_gb, pubkey   # for place()'s replacements
         # v2 takes one GPU type per create: walk the preference list until one has capacity.
         base = {
-            "name": self.name, "image": IMAGE, "cloud": "COMMUNITY", "disk": disk_gb,
+            "name": self.name, "image": IMAGE, "cloud": self.args.cloud, "disk": disk_gb,
             "ports": ["22/tcp"],
             "env": {"NVIDIA_DRIVER_CAPABILITIES": "all", "PUBLIC_KEY": pubkey},
         }
@@ -236,7 +249,11 @@ class Pod:
         return f"root@{self.host}:{path}"
 
     def wait_ssh(self):
+        """Until direct SSH works. RunPod API v2 can't ask for a public IP, so a
+        community pod may land behind NAT (only the shell-only proxy, no rsync):
+        such a pod raises NoDirectSSH once it's been RUNNING for 4 min."""
         deadline = time.time() + 20 * 60
+        running_since = None
         while True:
             if STOP.is_set():
                 raise Aborted()
@@ -255,18 +272,38 @@ class Pod:
             direct = (rec.get("ssh") or {}).get("direct") or {}
             port22 = next((p for p in (rec.get("runtime") or {}).get("ports") or []
                            if p.get("private") == 22 and p.get("public") and p.get("ip")), None)
-            if rec.get("status") == "RUNNING" and (direct.get("host") or port22):
-                self.host = direct.get("host") or port22["ip"]
-                self.port = int(direct.get("port") or port22["public"])
-                rc, _ = self.ssh("true", check=False, prefix_output=False)
-                if rc == 0:
-                    log(f"ssh up: root@{self.host} -p {self.port} ({self.gpu})", self.tag)
-                    return
+            if rec.get("status") == "RUNNING":
+                running_since = running_since or time.time()
+                if direct.get("host") or port22:
+                    self.host = direct.get("host") or port22["ip"]
+                    self.port = int(direct.get("port") or port22["public"])
+                    rc, _ = self.ssh("true", check=False, prefix_output=False)
+                    if rc == 0:
+                        log(f"ssh up: root@{self.host} -p {self.port} ({self.gpu})", self.tag)
+                        return
+                elif time.time() - running_since > 4 * 60:
+                    raise NoDirectSSH()
             time.sleep(10)
+
+    def place(self):
+        """A pod with direct SSH: replace ones that landed behind NAT."""
+        for attempt in range(1, 7):
+            try:
+                self.wait_ssh()
+                return
+            except NoDirectSSH:
+                log(f"{self.id}: no public SSH port (host behind NAT); replacing "
+                    f"(attempt {attempt})", self.tag)
+                self.prior_hours += (time.time() - self.created) / 3600
+                if not self.delete():
+                    raise RuntimeError(f"could not delete NAT'd pod {self.id}")
+                self.id = self.deleted = self.host = self.port = None
+                self.create(self.disk_gb, self.pubkey)
+        raise RuntimeError("6 pods in a row had no public SSH port")
 
     def work(self):
         a = self.args
-        self.wait_ssh()
+        self.place()
         log("setup: apt, node 24, Vulkan ICD fix", self.tag)
         self.ssh(SETUP_BASE)
         log("sync: hydra, render scripts, denylist, mp3s", self.tag)
@@ -275,11 +312,12 @@ class Pod:
         self.rsync(f"{RENDER_DIR}/", self.remote(f"{R_REPO}/scripts/render/"))
         self.rsync(str(DENYLIST), self.remote(f"{R_REPO}/scripts/bake/song_denylist.txt"))
         self.push_music()
+        self.rsync("--chmod=600", str(a.aws_env), self.remote(R_AWS))
         log("setup: npm ci, playwright chromium", self.tag)
         self.ssh(SETUP_HYDRA)
         rc = self.render()
-        log("pull: mp4s + sidecars", self.tag)
-        self.pull()
+        log(f"upload: mp4s, then sidecars -> {a.s3}", self.tag)
+        self.upload()
         if rc != 0:
             raise RuntimeError(f"render_songs.sh exited {rc} (failed songs are listed above)")
 
@@ -317,24 +355,15 @@ class Pod:
             log("lost the log stream; reconnecting", self.tag)
             time.sleep(10)
 
-    def pull(self):
-        out = self.args.out_dir
-        # First match wins: catalog.json and half-written *.mp4.tmp stay behind
-        self.rsync("--exclude", "catalog.json", "--include", "*.mp4", "--include", "*.json",
-                   "--exclude", "*", self.remote(f"{R_OUT}/"), f"{out}/")
-        self.pulled = True
-        # Sidecars name the mp4 by its pod path; point them at the local copy
-        with REWRITE:
-            for f in Path(out).glob("*.json"):
-                if f.name == "catalog.json":
-                    continue
-                try:
-                    d = json.loads(f.read_text())
-                except (OSError, ValueError):
-                    continue
-                if isinstance(d, dict) and str(d.get("file", "")).startswith(R_OUT + "/"):
-                    d["file"] = str(Path(out) / Path(d["file"]).name)
-                    f.write_text(json.dumps(d, indent=2, ensure_ascii=False) + "\n")
+    def upload(self):
+        """mp4s first, sidecars after: a sidecar on S3 (what marks a song done)
+        always has its mp4. Half-written *.mp4.tmp and the pod's catalog.json stay."""
+        s3 = self.args.s3
+        self.ssh(f"set -euo pipefail; set -a; . {R_AWS}; set +a; "
+                 f"aws s3 sync {R_OUT}/ {s3}/ --only-show-errors --exclude '*' --include '*.mp4'; "
+                 f"aws s3 sync {R_OUT}/ {s3}/ --only-show-errors --exclude '*' --include '*.json' "
+                 f"--exclude catalog.json")
+        self.uploaded = True
 
     def thread(self):
         try:
@@ -345,22 +374,78 @@ class Pod:
             self.error = str(e)
             if not STOP.is_set():
                 log(f"SHARD FAILED: {e}", self.tag)
-                # Still pull whatever finished before the failure
-                if self.host and not self.pulled:
+                # Still upload whatever finished before the failure
+                if self.host and not self.uploaded:
                     try:
-                        self.pull()
+                        self.upload()
                     except Exception as e2:  # noqa: BLE001
-                        log(f"pull after failure: {e2}", self.tag)
+                        log(f"upload after failure: {e2}", self.tag)
         else:
             log("shard done", self.tag)
 
 
-def pending_songs(music_dir, out_dir):
-    r = subprocess.run([str(RENDER_DIR / "render_songs.sh"), music_dir, out_dir, "--dry-run"],
+def s3_parts(uri):
+    bucket, _, prefix = uri.removeprefix("s3://").partition("/")
+    return bucket, prefix.strip("/")
+
+
+def scoped_credentials(s3, path):
+    """STS federation token (36 h) that can only list and put objects under
+    the catalog prefix, written as an env file for the pods."""
+    bucket, prefix = s3_parts(s3)
+    policy = {"Version": "2012-10-17", "Statement": [
+        {"Effect": "Allow", "Action": "s3:PutObject",
+         "Resource": f"arn:aws:s3:::{bucket}/{prefix}/*"},
+        {"Effect": "Allow", "Action": "s3:ListBucket", "Resource": f"arn:aws:s3:::{bucket}",
+         "Condition": {"StringLike": {"s3:prefix": [f"{prefix}/*", prefix]}}}]}
+    r = subprocess.run(["aws", "sts", "get-federation-token", "--name", "radio-songs",
+                        "--duration-seconds", "129600", "--policy", json.dumps(policy),
+                        "--output", "json"], stdout=subprocess.PIPE, text=True)
+    if r.returncode != 0:
+        sys.exit("aws sts get-federation-token failed (local AWS credentials of an IAM user?)")
+    c = json.loads(r.stdout)["Credentials"]
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(f"AWS_ACCESS_KEY_ID={c['AccessKeyId']}\nAWS_SECRET_ACCESS_KEY={c['SecretAccessKey']}\n"
+                f"AWS_SESSION_TOKEN={c['SessionToken']}\nAWS_DEFAULT_REGION=us-west-1\n")
+
+
+def fetch_sidecars(s3, directory):
+    """Mirror the song sidecars on S3 (not the mp4s) into directory."""
+    subprocess.run(["aws", "s3", "sync", f"{s3}/", f"{directory}/", "--only-show-errors",
+                    "--exclude", "*", "--include", "*.json", "--exclude", "catalog.json"],
+                   check=True)
+
+
+def pending_songs(music_dir, sidecar_dir):
+    r = subprocess.run([str(RENDER_DIR / "render_songs.sh"), music_dir, sidecar_dir, "--dry-run"],
                        stdout=subprocess.PIPE, text=True)
     if r.returncode != 0:
         sys.exit(f"render_songs.sh --dry-run failed (exit {r.returncode})")
     return [s for s in r.stdout.splitlines() if s]
+
+
+def publish_catalog(s3, sidecar_dir):
+    """catalog.json on S3 = its non-song entries + every song sidecar on S3."""
+    cur = Path(sidecar_dir) / "catalog.current.json"
+    r = subprocess.run(["aws", "s3", "cp", f"{s3}/catalog.json", str(cur), "--only-show-errors"],
+                       stderr=subprocess.PIPE, text=True)
+    entries = json.loads(cur.read_text())["pieces"] if r.returncode == 0 else []
+    entries = [e for e in entries if e.get("kind") != "song"]
+    songs = []
+    for f in sorted(Path(sidecar_dir).glob("*.json")):
+        if f.name.startswith("catalog."):
+            continue
+        d = json.loads(f.read_text())
+        if d.get("kind") == "song":
+            songs.append(d)
+    out = Path(sidecar_dir) / "catalog.new.json"
+    out.write_text(json.dumps({"pieces": entries + songs,
+                               "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())},
+                              indent=2) + "\n")
+    subprocess.run(["aws", "s3", "cp", str(out), f"{s3}/catalog.json", "--only-show-errors"],
+                   check=True)
+    log(f"catalog.json on S3: {len(entries)} pieces/idents + {len(songs)} song renders")
 
 
 def duration(path):
@@ -396,14 +481,19 @@ def raise_interrupt(signum, _frame):
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Render missing/stale song renders on RunPod GPUs (never uploads).",
+        description="Render missing/stale song renders on RunPod GPUs, uploading from the pods.",
         formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__.split("\n\n", 1)[1])
     ap.add_argument("--music-dir", required=True, help="the aired mp3s (mirror of S3_MUSIC_BUCKET)")
-    ap.add_argument("--out-dir", required=True, help="catalog dir; renders land here")
+    ap.add_argument("--s3", default=os.environ.get("S3_CATALOG_URI"),
+                    help="S3 catalog the pods upload to (default: $S3_CATALOG_URI)")
     ap.add_argument("--pods", type=int, default=1, help="pods to rent (default 1)")
     ap.add_argument("--jobs", type=int, default=4, help="renders at once per pod (default 4)")
     ap.add_argument("--gpu", nargs="+", default=GPUS, metavar="ID",
                     help="RunPod GPU type ids in preference order (default: %(default)s)")
+    ap.add_argument("--cloud", choices=("SECURE", "COMMUNITY"), default="SECURE",
+                    help="RunPod tier (default SECURE: public SSH ports and steadier capacity; "
+                         "COMMUNITY is ~40%% the price but its hosts flap and are often "
+                         "behind NAT)")
     ap.add_argument("--vxstory", default=os.environ.get("VXSTORY_DIR", str(REPO.parent / "vxstory")),
                     help="local vxstory checkout whose hydra/ is rendered (default: $VXSTORY_DIR "
                          "or ../vxstory)")
@@ -417,7 +507,9 @@ def main():
     if a.pods < 1 or a.jobs < 1:
         ap.error("--pods and --jobs must be >= 1")
     a.music_dir = str(Path(a.music_dir).resolve())
-    a.out_dir = str(Path(a.out_dir).resolve())
+    if not a.s3 or not a.s3.startswith("s3://") or not s3_parts(a.s3)[1]:
+        ap.error("--s3: need s3://bucket/prefix (or S3_CATALOG_URI)")
+    a.s3 = a.s3.rstrip("/")
     a.vxstory = str(Path(a.vxstory).resolve())
     if not (Path(a.vxstory) / "hydra" / "render.mjs").is_file():
         ap.error(f"no hydra/render.mjs under --vxstory {a.vxstory}")
@@ -426,20 +518,26 @@ def main():
     if not os.environ.get("RUNPOD_API_KEY"):
         ap.error("RUNPOD_API_KEY is not set (. ~/.secrets)")
 
-    pending = pending_songs(a.music_dir, a.out_dir)
+    a.tmp = tempfile.mkdtemp(prefix="runpod_songs.")  # sidecars, --only lists, creds
+    sidecars = os.path.join(a.tmp, "sidecars")
+    fetch_sidecars(a.s3, sidecars)
+    pending = pending_songs(a.music_dir, sidecars)
     if not pending:
         log("nothing to render: every song render is up to date")
+        shutil.rmtree(a.tmp, ignore_errors=True)
         return 0
     durs = {s: duration(os.path.join(a.music_dir, s)) for s in pending}
     shards, load = split(pending, durs, min(a.pods, len(pending)))
     if a.disk_gb is None:
-        # AVI ~1 GB per minute of 1080p60; mp4s budgeted at 0.25 GB/min; 20 GB system
+        # AVI ~1 GB per minute of 1080p60; mp4s ~0.34 GB/min averaged over the ten
+        # sketches (2.8-182 Mbps, uncapped), budgeted at 0.4 per version; 20 GB system
         longest = max(durs.values()) / 60
-        a.disk_gb = int(20 + a.jobs * longest * 1.1 + max(load) / 60 * 0.25) + 1
+        versions = int(os.environ.get("SONG_VERSIONS", "3"))
+        a.disk_gb = int(20 + a.jobs * longest * 1.1 + max(load) / 60 * 0.4 * versions) + 1
     log(f"{len(pending)} songs pending ({sum(durs.values()) / 3600:.2f} h of audio) over "
         f"{len(shards)} pod(s), --jobs {a.jobs}, {a.disk_gb} GB disk each")
-    os.makedirs(a.out_dir, exist_ok=True)
-    a.tmp = tempfile.mkdtemp(prefix="runpod_songs.")  # per-pod --only lists
+    a.aws_env = os.path.join(a.tmp, "aws.env")
+    scoped_credentials(a.s3, a.aws_env)
     pubkey = Path(a.ssh_key + ".pub").read_text().strip()
 
     pods = [Pod(i + 1, shard, a) for i, shard in enumerate(shards)]
@@ -479,19 +577,23 @@ def main():
                     f"-H 'Authorization: Bearer $RUNPOD_API_KEY'", p.tag)
             else:
                 p.delete()
-        shutil.rmtree(a.tmp, ignore_errors=True)
+
 
     if interrupted:
+        shutil.rmtree(a.tmp, ignore_errors=True)
         return 130
 
-    # Manifest + summary
-    subprocess.run([sys.executable, str(RENDER_DIR / "make_manifest.py"), a.out_dir])
-    still = set(pending_songs(a.music_dir, a.out_dir))
+    # Catalog + summary, from what actually reached S3
+    fetch_sidecars(a.s3, sidecars)
+    publish_catalog(a.s3, sidecars)
+    still = set(pending_songs(a.music_dir, sidecars))
+    shutil.rmtree(a.tmp, ignore_errors=True)
     log("summary")
     total_h = total_cost = 0.0
     for p in pods:
         p.rendered = sum(1 for s in p.songs if s not in still)
-        hours = ((p.deleted or time.time()) - p.created) / 3600 if p.created else 0.0
+        hours = p.prior_hours + (((p.deleted or time.time()) - p.created) / 3600
+                                 if p.created else 0.0)
         total_h += hours
         total_cost += hours * p.cost_per_hr
         state = "ok" if not p.error else f"FAILED: {p.error}"
@@ -502,7 +604,6 @@ def main():
           f"~${total_cost:.2f}")
     if still:
         print(f"  still pending ({len(still)}): {' '.join(sorted(still))}")
-    print(f"next: scripts/render/upload_catalog.sh {shlex.quote(a.out_dir)} \"$S3_CATALOG_URI\"")
     return 1 if still or any(p.error for p in pods) else 0
 
 

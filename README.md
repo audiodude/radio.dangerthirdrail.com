@@ -96,8 +96,9 @@ The next weekly bake picks new pieces up automatically.
 ### 🎶 Song renders (Hydra, synced to one song)
 
 A **song render** is a Hydra piece made from one song's audio (`render.mjs --audio`), so
-it reacts to that song and only makes sense over it. `render_songs.sh` makes one per
-library song (the bake's denylist excepted), into the same catalog dir as the pieces:
+it reacts to that song and only makes sense over it. `render_songs.sh` makes
+`SONG_VERSIONS` (default **3**) per library song, each a different sketch (the bake's
+denylist excepted), into the same catalog dir as the pieces:
 
 ```bash
 aws s3 sync "$S3_MUSIC_BUCKET" ./music --exclude "*" --include "*.mp3"   # the aired files
@@ -108,8 +109,15 @@ scripts/render/render_songs.sh ./music ./catalog_1080 --jobs 4 --only todo.txt
 scripts/render/render_piece.sh hydra glass 4242 song ./catalog_1080 --audio ./music/x.mp3
 ```
 
-- Each song's preset (`SONG_PRESETS`, default all ten sketches) and seed come from a hash
-  of its file name, so new songs never reshuffle old ones. Credit: `Hydra Glass` etc.
+- A song's sketches are the `SONG_VERSIONS` presets (`SONG_PRESETS`, default all ten) that
+  rank highest by a hash of song + preset, and each seed comes from the same hash. New songs
+  never reshuffle old ones, and adding a sketch only moves the songs that now rank it in
+  their top 3. The bake's preset bag picks one version each time the song lands in a hydra
+  stretch. Credit: `Hydra Glass`, `Hydra Hex Tunnel` etc.
+- Renders are CRF 18 with **no bitrate cap**, so size varies 60× by sketch (20 s samples:
+  organ_pipes 2.8, slices 5, third_eye 10, halftone 15, hex_tunnel/glass 31, tiger 41,
+  mandala 53, fold 86, babylon_tile 183 Mbps; ~46 average). Three versions of the ~6.5 h
+  library come to roughly **400 GB on S3** (~$9/month); the box only fetches a week's.
 - The sidecar is `kind: "song"` with `song` (file name) and `song_sha256`. Renders must come
   from the **S3 library copy**: trimming moves a song's start, so any other file drifts.
   A re-run redoes a render whose song has changed and skips the rest.
@@ -121,31 +129,35 @@ scripts/render/render_piece.sh hydra glass 4242 song ./catalog_1080 --audio ./mu
   bound by per-frame readback, not the GPU, so `--jobs` scales almost linearly (4 at once
   ≈ 3.7×). Each render parks a ~1 GB/min AVI next to the output until it's encoded.
 
-**On RunPod.** `runpod_songs.py` renders whatever `--dry-run` lists on rented community
-GPUs (RTX 3090 first) and pulls the results into the catalog dir:
+**On RunPod.** `runpod_songs.py` renders whatever is missing on rented community GPUs (RTX
+3090 first) and **uploads straight from the pods** to the S3 catalog:
 
 ```bash
-. ~/.secrets   # RUNPOD_API_KEY
-scripts/render/runpod_songs.py --music-dir ./music --out-dir ./catalog_1080 \
-    --pods 2 --jobs 4 --vxstory ../vxstory
+. ~/.secrets   # RUNPOD_API_KEY, S3_CATALOG_URI (or --s3); local AWS creds of an IAM user
+scripts/render/runpod_songs.py --music-dir ./music --pods 8 --jobs 4 --vxstory ../vxstory
 ```
 
-- Nothing pending: no pod. Otherwise the songs are split by duration over `--pods` pods
-  (`radio-songs-<n>`, one thread each). A pod gets Node 24, the Vulkan ICD fix (the host's
-  GLX ICD fails headless; without the fix `render.mjs` refuses SwiftShader), the **local**
-  vxstory `hydra/` (so it renders exactly your sketches), `scripts/render/`, the denylist and
-  only its own mp3s, then runs `render_songs.sh --jobs K --only <its songs>`. Finished mp4s
-  and sidecars are pulled back even when a song fails (the shard is then reported FAILED);
-  `make_manifest.py` rebuilds `catalog.json` locally.
-- It **never uploads**: no AWS credentials go to community hosts. The summary ends with the
-  `upload_catalog.sh` command to run.
+- Pending songs are `render_songs.sh --dry-run` against the song sidecars already on S3 (a
+  sidecar is only uploaded after its mp4). Nothing pending: no pod. Otherwise the songs are
+  split by duration over `--pods` pods (`radio-songs-<n>`, one thread each). A pod gets
+  Node 24, the AWS CLI, the Vulkan ICD fix (the host's GLX ICD fails headless; without the
+  fix `render.mjs` refuses SwiftShader), the **local** vxstory `hydra/` (so it renders
+  exactly your sketches), `scripts/render/`, the denylist and only its own mp3s, then runs
+  `render_songs.sh --jobs K --only <its songs>` and syncs its mp4s, then sidecars, to S3,
+  even when a song fails (the shard is then reported FAILED).
+- **Credentials:** pods are third-party machines, so they never get your AWS keys. Each run
+  mints an STS federation token (36 h) allowed only to list and put objects under the catalog
+  prefix, and deletes its local copy at the end.
+- At the end `catalog.json` on S3 is rebuilt: its pieces and idents plus every song sidecar
+  on S3. No `upload_catalog.sh` step.
 - Every pod it creates is deleted by id on success, error, Ctrl-C, SIGTERM or SIGHUP, and the
   delete is confirmed (GET → 404). `--keep-on-failure` keeps a failed shard's pod for
   inspection and prints its id; delete it yourself.
-- Cost: ~7.6 fps per render on a 3090, ~28 fps per pod at `--jobs 4`, so the whole library
-  is roughly **14 pod-hours at $0.22/h (~$3)**, plus each pod's setup (apt, npm, Chromium).
-  The summary prints songs, pod-hours and approximate cost per pod. Disk is sized to
-  `--jobs` AVIs of the longest song plus the shard's mp4s (`--disk-gb` overrides).
+- Cost: ~7.6 fps per render on a 3090, ~28 fps per pod at `--jobs 4`, so one version of the
+  library is roughly **14 pod-hours at $0.22/h (~$3)**, three ~42 (~$9), plus each pod's
+  setup (apt, npm, Chromium). The summary prints songs, pod-hours and approximate cost per
+  pod. Pod disk is sized to `--jobs` AVIs of the longest song plus the shard's mp4s at
+  `SONG_VERSIONS` versions (`--disk-gb` overrides).
 
 ### 🪧 Idents
 
