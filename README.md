@@ -84,7 +84,7 @@ scripts/render/upload_catalog.sh ./catalog_1080 s3://bucket/catalog/
   **Rotation** below).
 - Renders are serialized (one GPU), idempotent (existing mp4s are skipped, writes are
   atomic), and run about **6× realtime on a 3080 Ti** (~29 min per 300 s piece, encode included).
-- **Hydra** (original Hydra sketches; presets `glass`, `fold`, `slices`) is audio-reactive, so
+- **Hydra** (original Hydra sketches, ten presets from `babylon_tile` to `tiger`) is audio-reactive, so
   it airs only as song renders (below), never as fixed-length pieces. It
   renders through vxstory's own `hydra/render.mjs` in headless GPU Chromium instead of
   Godot. `render_piece.sh` picks it whenever the model dir has a `render.mjs`, runs Node
@@ -108,7 +108,7 @@ scripts/render/render_songs.sh ./music ./catalog_1080 --jobs 4 --only todo.txt
 scripts/render/render_piece.sh hydra glass 4242 song ./catalog_1080 --audio ./music/x.mp3
 ```
 
-- Each song's preset (`SONG_PRESETS`, default `glass fold slices`) and seed come from a hash
+- Each song's preset (`SONG_PRESETS`, default all ten sketches) and seed come from a hash
   of its file name, so new songs never reshuffle old ones. Credit: `Hydra Glass` etc.
 - The sidecar is `kind: "song"` with `song` (file name) and `song_sha256`. Renders must come
   from the **S3 library copy**: trimming moves a song's start, so any other file drifts.

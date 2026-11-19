@@ -34,7 +34,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-API = "https://rest.runpod.io/v1"
+API = "https://api.runpod.io/v2"  # v1 (rest.runpod.io) is gone: NXDOMAIN since Nov 2026
 USER_AGENT = "radio-songs/1"  # urllib's default UA gets a Cloudflare 403 (1010)
 IMAGE = "runpod/base:2.0.0-ubuntu2404"  # has ffmpeg + git
 GPUS = ["NVIDIA GeForce RTX 3090", "NVIDIA RTX A4000", "NVIDIA RTX A5000",
@@ -147,32 +147,44 @@ class Pod:
 
     # --- lifecycle -----------------------------------------------------------
     def create(self, disk_gb, pubkey):
-        body = {
-            "name": self.name, "imageName": IMAGE, "computeType": "GPU",
-            "cloudType": "COMMUNITY", "gpuCount": 1, "gpuTypeIds": self.args.gpu,
-            "gpuTypePriority": "custom", "containerDiskInGb": disk_gb, "volumeInGb": 0,
-            "ports": ["22/tcp"], "supportPublicIp": True,
+        # v2 takes one GPU type per create: walk the preference list until one has capacity.
+        base = {
+            "name": self.name, "image": IMAGE, "cloud": "COMMUNITY", "disk": disk_gb,
+            "ports": ["22/tcp"],
             "env": {"NVIDIA_DRIVER_CAPABILITIES": "all", "PUBLIC_KEY": pubkey},
         }
         # Block SIGINT/SIGTERM/SIGHUP across the POST so the id is always recorded
         # before an interrupt can unwind (it is delivered right after).
         sigs = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
-        signal.pthread_sigmask(signal.SIG_BLOCK, sigs)
-        try:
+        errors = []
+        # Community capacity flaps second to second ("no longer any instances"), so
+        # walk the list a few times before giving up.
+        for gpu in [g for _ in range(4) for g in self.args.gpu]:
+            if errors and gpu == self.args.gpu[0]:
+                time.sleep(15)
+            signal.pthread_sigmask(signal.SIG_BLOCK, sigs)
             try:
-                rec = api("POST", "/pods", body, timeout=120)
-            except urllib.error.HTTPError as e:
-                raise RuntimeError(f"create {self.name}: HTTP {e.code}: {e.read().decode()[:300]}")
-            except OSError as e:
-                raise RuntimeError(f"create {self.name}: {e}; the request may still have made a "
-                                   f"pod: check the RunPod console for a stray {self.name}")
-            self.id = rec["id"]
-            self.created = time.time()
-            self.cost_per_hr = float(rec.get("costPerHr") or 0)
-            self.gpu = (rec.get("machine") or {}).get("gpuTypeId") or rec.get("gpuTypeId") or "?"
-        finally:
-            signal.pthread_sigmask(signal.SIG_UNBLOCK, sigs)
-        log(f"created {self.name}: id {self.id}, ${self.cost_per_hr:.2f}/h, "
+                try:
+                    rec = api("POST", "/pods", {**base, "gpu": {"id": gpu, "count": 1}},
+                              timeout=120)
+                except urllib.error.HTTPError as e:
+                    errors.append(f"{gpu}: HTTP {e.code}: {e.read().decode()[:200]}")
+                    continue
+                except OSError as e:
+                    raise RuntimeError(f"create {self.name}: {e}; the request may still have "
+                                       f"made a pod: check the RunPod console for a stray "
+                                       f"{self.name}")
+                self.id = rec["id"]
+                self.created = time.time()
+                self.cost_per_hr = float(rec.get("cost") or 0)
+                self.gpu = (rec.get("gpu") or {}).get("id") or gpu
+                break
+            finally:
+                signal.pthread_sigmask(signal.SIG_UNBLOCK, sigs)
+        if self.id is None:
+            raise RuntimeError(f"create {self.name}: no GPU type had capacity in 4 tries; last: "
+                               + "; ".join(errors[-len(self.args.gpu):]))
+        log(f"created {self.name}: id {self.id}, {self.gpu}, ${self.cost_per_hr:.2f}/h, "
             f"{len(self.songs)} songs", self.tag)
 
     def delete(self):
@@ -235,14 +247,17 @@ class Pod:
             except (OSError, ValueError) as e:
                 log(f"poll: {e}", self.tag)
                 rec = {}
-            if rec.get("costPerHr"):
-                self.cost_per_hr = float(rec["costPerHr"])
-            gpu = (rec.get("machine") or {}).get("gpuTypeId") or rec.get("gpuTypeId")
+            if rec.get("cost"):
+                self.cost_per_hr = float(rec["cost"])
+            gpu = (rec.get("gpu") or {}).get("id")
             if gpu:
                 self.gpu = gpu
-            ports = {str(k): v for k, v in (rec.get("portMappings") or {}).items()}
-            if rec.get("publicIp") and ports.get("22"):
-                self.host, self.port = rec["publicIp"], int(ports["22"])
+            direct = (rec.get("ssh") or {}).get("direct") or {}
+            port22 = next((p for p in (rec.get("runtime") or {}).get("ports") or []
+                           if p.get("private") == 22 and p.get("public") and p.get("ip")), None)
+            if rec.get("status") == "RUNNING" and (direct.get("host") or port22):
+                self.host = direct.get("host") or port22["ip"]
+                self.port = int(direct.get("port") or port22["public"])
                 rc, _ = self.ssh("true", check=False, prefix_output=False)
                 if rc == 0:
                     log(f"ssh up: root@{self.host} -p {self.port} ({self.gpu})", self.tag)

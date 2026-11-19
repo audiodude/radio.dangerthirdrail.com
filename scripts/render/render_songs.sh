@@ -11,7 +11,7 @@
 # --dry-run   print the songs whose render is missing or stale (no mp4, or the
 #             sidecar's song_sha256 isn't the mp3's), one per line; render nothing.
 #
-# Env: SONG_MODEL (hydra), SONG_PRESETS ("glass fold slices"), plus
+# Env: SONG_MODEL (hydra), SONG_PRESETS (the ten sketches below), plus
 # render_piece.sh's (VXSTORY_DIR, RENDER_RES, RENDER_TMPDIR).
 set -euo pipefail
 
@@ -33,7 +33,8 @@ OUT_DIR="${ARGS[1]}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DENYLIST="$SCRIPT_DIR/../bake/song_denylist.txt"
 MODEL="${SONG_MODEL:-hydra}"
-read -r -a PRESETS <<< "${SONG_PRESETS:-glass fold slices}"
+# Changing this list reassigns songs to presets, so they re-render: append, don't reorder.
+read -r -a PRESETS <<< "${SONG_PRESETS:-babylon_tile fold glass halftone hex_tunnel mandala organ_pipes slices third_eye tiger}"
 
 # --dry-run's stdout is the song list only; progress goes to stderr
 if (( DRY_RUN )); then exec 3>&2; else exec 3>&1; fi
@@ -57,7 +58,9 @@ assign() {
     h="$(printf '%s' "$1" | sha256sum)"
     preset="${PRESETS[$(( 16#${h:0:8} % ${#PRESETS[@]} ))]}"
     seed=$(( 16#${h:8:6} % 9000 + 1000 ))
-    title="${MODEL^} ${preset^}"
+    local words
+    read -r -a words <<< "${preset//_/ }"
+    title="${MODEL^} ${words[*]^}"                  # hex_tunnel -> Hydra Hex Tunnel
 }
 
 TODO=()

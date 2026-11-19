@@ -2,7 +2,7 @@
   "hydra": {
     "weight": 1,
     "models": {
-      "hydra": {"weight": 1, "presets": {"glass": 1, "fold": 1, "slices": 1}}
+      "hydra": {"weight": 1}
     }
   },
   "godot": {
