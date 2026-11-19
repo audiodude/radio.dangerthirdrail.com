@@ -34,7 +34,18 @@ fi
 echo "[bake] syncing inputs from S3"
 # --delete: a song removed from S3 must also leave the box's library.
 aws s3 sync "${S3_MUSIC_BUCKET:?}" "$MUSIC_DIR/" --no-progress --delete --exclude "*" --include "*.mp3"
-aws s3 sync "${S3_CATALOG_URI:?}" "$CATALOG_DIR/" --no-progress
+# The catalog stays on S3: the box takes catalog.json and the idents (probed
+# while planning), then, once planned, only the mp4s the plan plays.
+S3_CATALOG="${S3_CATALOG_URI:?}"; S3_CATALOG="${S3_CATALOG%/}"
+aws s3 cp "$S3_CATALOG/catalog.json" "$CATALOG_DIR/catalog.json" --no-progress
+MEDIA=(python3 "$HERE/media.py")
+fetch() {   # fetch NAME...: download (or refresh) these mp4s into CATALOG_DIR
+    local inc=() n
+    for n in "$@"; do inc+=(--include "$n"); done
+    aws s3 sync "$S3_CATALOG/" "$CATALOG_DIR/" --no-progress --exclude "*" "${inc[@]}"
+}
+mapfile -t IDENTS < <("${MEDIA[@]}" idents "$CATALOG_DIR/catalog.json")
+fetch "${IDENTS[@]}"
 
 mkdir -p "$SET_DIR"
 PLAN="$SET_DIR/plan.json"
@@ -51,6 +62,12 @@ if [[ -f "$PLAN" ]] && ! same_vods "$PLAN" "$PLAN.new"; then
     rm -f "$SET_DIR"/vod-*.mp4
 fi
 mv "$PLAN.new" "$PLAN"
+
+mapfile -t USED < <("${MEDIA[@]}" used "$PLAN")
+echo "[bake] fetching ${#USED[@]} mp4s the plan plays"
+"${MEDIA[@]}" prune "$CATALOG_DIR" "${USED[@]}" "${IDENTS[@]}"   # last week's, first: frees room
+fetch "${USED[@]}"
+"${MEDIA[@]}" check "$CATALOG_DIR/catalog.json" "${USED[@]}"
 
 echo "[bake] encoding VODs"
 python3 "$HERE/assemble.py" --plan "$PLAN" --out-dir "$SET_DIR"

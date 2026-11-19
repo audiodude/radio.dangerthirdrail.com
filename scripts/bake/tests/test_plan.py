@@ -208,14 +208,35 @@ def test_vod_metadata_names_renders_and_links_songs():
     assert "<" not in v["description"] + v["title"]
 
 
-def test_resolve_media_prefers_sibling_of_catalog(tmp_path):
-    # catalog.json records the render host's path; the bake machine has the mp4
-    # next to catalog.json instead.
-    local = tmp_path / "piece.mp4"
-    local.write_bytes(b"x")
-    assert plan.resolve_media("/home/renderbox/out/piece.mp4", str(tmp_path)) == str(local)
-    # nothing local -> keep the recorded path (single-machine case)
-    assert plan.resolve_media("/elsewhere/gone.mp4", str(tmp_path)) == "/elsewhere/gone.mp4"
+def test_catalog_plans_without_piece_files_then_box_fetches_only_what_it_uses(tmp_path):
+    # catalog.json records the render host's paths; on the box only catalog.json
+    # and the idents exist until the plan says which pieces/renders to fetch
+    import media, shutil, subprocess
+    fx = tmp_path / "fx"
+    subprocess.run([os.path.join(os.path.dirname(__file__), "make_fixtures.sh"), str(fx)],
+                   check=True, capture_output=True)
+    cat_dir = fx / "catalog"
+    stash = tmp_path / "s3"
+    stash.mkdir()
+    for f in ("piece_a.mp4", "piece_b.mp4"):
+        shutil.move(cat_dir / f, stash / f)
+    (cat_dir / "stale.mp4").write_bytes(b"x")              # from an old week
+    catalog = plan._load_catalog(str(cat_dir / "catalog.json"))
+    assert {p["src"] for p in catalog["pieces"]} == {str(cat_dir / "piece_a.mp4"),
+                                                     str(cat_dir / "piece_b.mp4")}
+    lib = plan.load_library(str(fx / "music"), set())
+    p = plan.build_set(catalog, lib, {"seed": 1, "swap_at": "x", "fps": 60, "resolution": "320x180"})
+    need = media.used(p)
+    assert "ident.mp4" in need and set(need) <= {"ident.mp4", "piece_a.mp4", "piece_b.mp4"}
+    assert media.idents(json.loads((cat_dir / "catalog.json").read_text())) == ["ident.mp4"]
+    assert media.prune(str(cat_dir), set(need)) == ["stale.mp4"]
+    assert any("missing" in b for b in media.check(str(cat_dir / "catalog.json"), need))
+    for f in need:
+        if (stash / f).exists():
+            shutil.copy(stash / f, cat_dir / f)
+    assert media.check(str(cat_dir / "catalog.json"), need) == []
+    (cat_dir / need[-1]).write_bytes((stash / need[-1]).read_bytes()[:4000])   # truncated
+    assert media.check(str(cat_dir / "catalog.json"), need)
 
 
 def _hashed(i, dur=200.0):

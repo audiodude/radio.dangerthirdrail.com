@@ -391,19 +391,17 @@ def build_set(catalog: dict, library: list[dict], config: dict) -> dict:
     }
 
 
-def resolve_media(entry_file: str, catalog_dir: str) -> str:
-    """catalog.json records the absolute path on the machine that RENDERED the
-    piece; the bake runs elsewhere (box: /data/catalog). Prefer the sibling file
-    next to catalog.json, fall back to the recorded path."""
-    local = os.path.join(catalog_dir, os.path.basename(entry_file))
-    return local if os.path.exists(local) else entry_file
-
-
 def _load_catalog(path: str) -> dict:
-    """Pieces keep `model`, `preset` and an optional `title` (their credit).
-    Idents may carry `weight` (marbles in the ident bag, a whole number,
-    default 1) and `filler` (may open two VODs in a row). Whether an ident has
-    audio is probed. Piece weights live in weights.json, not sidecars."""
+    """Every mp4 is the sibling of catalog.json with the recorded file's name
+    (catalog.json records the render host's path). Pieces and song renders
+    plan from the catalog's `duration_sec` (ffprobed at render time), so their
+    mp4s needn't be on disk yet: the bake fetches only what the plan uses
+    (`media.py`). Idents are probed, so they must be local.
+
+    Pieces keep `model`, `preset` and an optional `title` (their credit); song
+    renders also keep their `song` and its `song_sha256`. Idents may carry
+    `weight` (marbles in the ident bag, a whole number, default 1) and `filler`
+    (may open two VODs in a row). Piece weights live in weights.json."""
     with open(path) as f:
         data = json.load(f)
     here = os.path.dirname(os.path.abspath(path))
@@ -412,11 +410,11 @@ def _load_catalog(path: str) -> dict:
         key = {"piece": "pieces", "ident": "idents", "song": "songs"}.get(e["kind"])
         if key is None:
             continue
-        f_path = resolve_media(e["file"], here)
-        item = {"src": f_path, "dur": ffprobe_duration(f_path)}
+        f_path = os.path.join(here, os.path.basename(e["file"]))
         if key in ("pieces", "songs"):
-            item.update(model=e.get("model", os.path.splitext(os.path.basename(f_path))[0]),
-                        preset=e.get("preset", ""))
+            item = {"src": f_path, "dur": float(e["duration_sec"]),
+                    "model": e.get("model", os.path.splitext(os.path.basename(f_path))[0]),
+                    "preset": e.get("preset", "")}
             if e.get("title"):
                 item["title"] = e["title"]
             if key == "songs":
@@ -426,8 +424,8 @@ def _load_catalog(path: str) -> dict:
             weight = e.get("weight", 1)
             if weight != int(weight) or weight <= 0:
                 raise ValueError(f"ident {e['file']}: weight must be a whole number > 0, got {weight}")
-            item.update(weight=int(weight), filler=bool(e.get("filler", False)),
-                        audio=ffprobe_has_audio(f_path))
+            item = {"src": f_path, "dur": ffprobe_duration(f_path), "weight": int(weight),
+                    "filler": bool(e.get("filler", False)), "audio": ffprobe_has_audio(f_path)}
         out[key].append(item)
     return out
 

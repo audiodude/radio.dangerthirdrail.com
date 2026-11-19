@@ -22,7 +22,7 @@ set, about 6.5 hours long, all week.
 
 | When | What happens |
 |---|---|
-| **Wed 03:00** | `radio-station-bake.timer`: sync music + catalog from S3, plan the set for Friday, encode every VOD at 1080p60 (~10–16 h), validate, publish to S3, hand it to the station job |
+| **Wed 03:00** | `radio-station-bake.timer`: sync music + `catalog.json` from S3, plan the set for Friday, fetch only the mp4s it plays, encode every VOD at 1080p60 (~10–16 h), validate, publish to S3, hand it to the station job |
 | **hourly** | `radio-station.timer`: upload VODs (unlisted), check YouTube's processing, swap, delete, health-check, alert |
 | **Thu 18:00** | Telegram alert if the new set isn't fully uploaded and processed |
 | **Fri 06:00** | **Swap**: the new VODs are appended to the playlist in order, then last week's are removed. Not ready? Last week's set keeps playing and the swap happens as soon as it is |
@@ -182,6 +182,12 @@ they're in the library. Full details, including why −21 and not −14:
 The plan is deterministic: the seed is the date of the Friday the set goes on air, so a
 week's set can always be re-derived.
 
+- **Media**: the catalog lives on S3. The box downloads `catalog.json` and the idents, plans
+  from the catalog's `duration_sec` (so piece and song-render mp4s needn't be local), then
+  deletes the mp4s this plan doesn't play and fetches the ones it does
+  (`scripts/bake/media.py`), checking each against its catalog duration. Disk on the box
+  scales with one week's set, not with the catalog, so S3 can hold any number of song-render
+  versions.
 - **Target**: the coming Friday. Skipped if a set is already waiting, or if the live set
   went on air less than 4 days before that Friday (so a mid-week launch gets a full first
   week). `bake.sh --now` bakes a launch set that swaps in as soon as it's uploaded.
@@ -282,9 +288,9 @@ ssh radio-playout 'journalctl -u radio-station-bake -f'
 changes before Wednesday 03:00 PT.
 
 **Disk.** `/data/catalog` is its own 100 GB Hetzner volume (`radio-catalog`, mounted by
-UUID in `/etc/fstab`, `nofail`); sets and music stay on the 150 GB root disk, where the
-bake needs `BAKE_MIN_FREE_GB` (70) free. Grow the volume with `hcloud volume resize`,
-then `resize2fs` on the box.
+UUID in `/etc/fstab`, `nofail`); it holds only the current plan's mp4s (see **Media**).
+Sets and music stay on the 150 GB root disk, where the bake needs `BAKE_MIN_FREE_GB` (70)
+free. Grow the volume with `hcloud volume resize`, then `resize2fs` on the box.
 
 ## 🧪 Tests
 

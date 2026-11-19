@@ -10,8 +10,8 @@ mk piece_b.mp4 green 30
 mk ident.mp4 white 4
 cat > "$DIR/catalog/catalog.json" <<JSON
 {"pieces":[
-  {"file":"$DIR/catalog/piece_a.mp4","kind":"piece"},
-  {"file":"$DIR/catalog/piece_b.mp4","kind":"piece"},
+  {"file":"/renderhost/out/piece_a.mp4","kind":"piece","duration_sec":30},
+  {"file":"/renderhost/out/piece_b.mp4","kind":"piece","duration_sec":30},
   {"file":"$DIR/catalog/ident.mp4","kind":"ident"}
 ]}
 JSON
