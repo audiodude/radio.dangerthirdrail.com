@@ -9,8 +9,9 @@ sidecars already on S3; with none, no pod is created. They are split by
 duration over min(N, pending) community pods (`radio-songs-<n>`), one thread
 per pod. Each pod gets the LOCAL vxstory `hydra/` (so it renders exactly the
 local sketches), this repo's `scripts/render/` and the bake's denylist, and
-only its own mp3s; it runs `render_songs.sh --jobs K --only <its songs>`, then
-syncs its mp4s, then their sidecars, to --s3. Finally catalog.json on S3 is
+only its own mp3s; it runs `render_songs.sh --jobs K --only <its songs>` while
+an uploader pushes each finished render (mp4, then sidecar) to --s3 every 2 min.
+Finally catalog.json on S3 is
 rebuilt: its non-song entries plus every song sidecar there.
 
 Community hosts are third-party machines, so pods never see the local AWS

@@ -143,8 +143,9 @@ scripts/render/runpod_songs.py --music-dir ./music --pods 8 --jobs 4 --vxstory .
   Node 24, the AWS CLI, the Vulkan ICD fix (the host's GLX ICD fails headless; without the
   fix `render.mjs` refuses SwiftShader), the **local** vxstory `hydra/` (so it renders
   exactly your sketches), `scripts/render/`, the denylist and only its own mp3s, then runs
-  `render_songs.sh --jobs K --only <its songs>` and syncs its mp4s, then sidecars, to S3,
-  even when a song fails (the shard is then reported FAILED).
+  `render_songs.sh --jobs K --only <its songs>`. An uploader on the pod pushes finished mp4s,
+  then their sidecars, to S3 every 2 minutes while it renders, so a dead pod or an empty
+  RunPod balance loses only the renders in flight; a rerun picks up the rest.
 - **Credentials:** pods are third-party machines, so they never get your AWS keys. Each run
   mints an STS federation token (36 h) allowed only to list and put objects under the catalog
   prefix, and deletes its local copy at the end.
