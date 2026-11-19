@@ -114,11 +114,13 @@ def _weight(node: dict, where: str) -> int:
     return w
 
 
-def piece_bag(pieces: list[dict], weights: dict, rng) -> Bag:
-    """Nested bags: class (e.g. hydra vs godot) -> model -> preset -> piece.
+def visual_bags(items: list[dict], weights: dict, rng) -> tuple[Bag, dict]:
+    """Nested bags: class (e.g. hydra vs godot) -> model -> preset -> item.
     `weights` (weights.json): {class: {weight, default?, models: {model:
     {weight, presets: {preset: weight}}}}}. Unlisted models join the `default`
-    class; any weight left out is 1."""
+    class; any weight left out is 1. Items are pieces or song renders (they
+    carry `song`); a class holds one kind or the other. Returns the class bag
+    (of class names; drawn once per stretch) and each class's own bag."""
     default = [c for c, v in weights.items() if v.get("default")]
     if len(default) != 1:
         raise ValueError(f"weights: need exactly one default class, got {default}")
@@ -129,10 +131,10 @@ def piece_bag(pieces: list[dict], weights: dict, rng) -> Bag:
                 raise ValueError(f"weights: model {m} is in both {home[m]} and {c}")
             home[m] = c
     tree = {}
-    for p in sorted(pieces, key=lambda p: p["src"]):
+    for p in sorted(items, key=lambda p: p["src"]):
         c = home.get(p["model"], default[0])
         tree.setdefault(c, {}).setdefault(p["model"], {}).setdefault(p.get("preset", ""), []).append(p)
-    classes = []
+    subs, classes = {}, []
     for c in sorted(tree):
         cw = weights.get(c, {})
         models = []
@@ -142,20 +144,30 @@ def piece_bag(pieces: list[dict], weights: dict, rng) -> Bag:
                         _weight(mw.get("presets", {}).get(s, 1), f"{c}/{m}/{s}"))
                        for s in sorted(tree[c][m])]
             models.append((Bag(presets, rng), _weight(mw, f"{c}/{m}")))
-        classes.append((Bag(models, rng), _weight(cw, c)))
-    bag = Bag(classes, rng)
-    if not bag.leaves:
+        bag, w = Bag(models, rng), _weight(cw, c)
+        if not bag.leaves or w == 0:
+            continue
+        if len({"song" in x for x in bag.leaves}) > 1:
+            raise ValueError(f"weights: class {c} mixes song renders and pieces")
+        subs[c] = bag
+        classes.append((c, w))
+    if not any("song" not in b.leaves[0] for b in subs.values()):
         raise ValueError("weights leave no piece to play")
-    return bag
+    return Bag(classes, rng), subs
 
 
 class Rotation:
-    """Pieces from the nested marble bag; never the piece just shown."""
+    """Pieces from one class's marble bag at a time (`use`); never the piece
+    just shown, across classes too."""
 
-    def __init__(self, bag: Bag):
-        self.bag = bag
+    def __init__(self, bags: dict):
+        self.bags = bags
         self.last = None
-        self.longest = max(p["dur"] for p in bag.leaves)
+        self.use(next(iter(bags)))
+
+    def use(self, cls):
+        self.bag = self.bags[cls]
+        self.longest = max(p["dur"] for p in self.bag.leaves)
 
     def take(self, length, avoid=()):
         """A piece covering `length`, not the last one shown nor `avoid` if
@@ -292,12 +304,11 @@ def _sha(parts) -> str:
     return h.hexdigest()[:16]
 
 
-def match_song_renders(renders: list[dict], library: list[dict]) -> dict:
-    """Song renders usable this set, keyed by song file name: the song is in the
-    library, its bytes (sha256) are the ones the render was made from, and the
-    render covers the whole song. Of several, the newest wins. A stale render
-    would drift off the music, so it is dropped (logged) and the song gets
-    rotation pieces."""
+def match_song_renders(renders: list[dict], library: list[dict]) -> list[dict]:
+    """Song renders usable this set: the song is in the library, its bytes
+    (sha256) are the ones the render was made from, and the render covers the
+    whole song. Of several for one song and preset, the newest wins. A stale
+    render would drift off the music, so it is dropped (logged)."""
     import sys
     songs = {os.path.basename(s["file"]): s for s in library}
     out = {}
@@ -310,13 +321,20 @@ def match_song_renders(renders: list[dict], library: list[dict]) -> dict:
         elif float(r["dur"]) < float(s["dur"]) - 1e-3:
             print(f"[plan] short song render {r['src']}: {r['dur']}s < {s['dur']}s", file=sys.stderr)
         else:
-            out[r["song"]] = r
-    return out
+            out[(r["song"], r.get("preset", ""))] = r
+    return list(out.values())
 
 
 def build_set(catalog: dict, library: list[dict], config: dict) -> dict:
     """`config`: seed, swap_at, fps, resolution, blurb (optional),
-    uncut_share (optional), weights (optional, see `piece_bag`)."""
+    uncut_share (optional), weights (optional, see `visual_bags`).
+    `catalog["songs"]` (optional): song renders.
+
+    Each stretch draws a class from the class bag. A piece class lays out
+    its pieces as usual. A song-render class plays, under each song of the
+    stretch, one of that song's renders; songs without one get pieces from the
+    default class. A song-render class is only drawn for a stretch with at
+    least one rendered song; otherwise its marble waits for a later stretch."""
     seed = int(config["seed"])
     blurb = config.get("blurb", "")
     uncut_share = float(config.get("uncut_share", UNCUT_SHARE))
@@ -328,15 +346,31 @@ def build_set(catalog: dict, library: list[dict], config: dict) -> dict:
 
     pieces = catalog["pieces"]
     weights = config.get("weights") or {"all": {"default": True}}
-    rot = Rotation(piece_bag(pieces, weights, random.Random(f"pieces:{seed}")))
+    song_renders = match_song_renders(catalog.get("songs", []), library)
+    classes, subs = visual_bags(pieces + song_renders, weights, random.Random(f"pieces:{seed}"))
+    song_cls = {c for c, b in subs.items() if "song" in b.leaves[0]}
+    piece_bags = {c: b for c, b in subs.items() if c not in song_cls}
+    default = next(c for c, v in weights.items() if v.get("default"))
+    fallback = default if default in piece_bags else next(iter(piece_bags))
+    rot = Rotation(piece_bags)
     rng = random.Random(f"edl:{seed}")
-    synced = match_song_renders(catalog.get("songs", []), library)
-    names = {p["src"]: render_name(p) for p in pieces + list(synced.values())}
+    names = {p["src"]: render_name(p) for p in pieces + song_renders}
 
     vods = []
     for k, (group, ident) in enumerate(zip(groups, idents)):
         first = vods[0]["edl"][1:2] if vods else []
         avoid = {first[0]["src"]} if k == len(groups) - 1 and first else ()
+        here = {os.path.basename(s["file"]) for s in group}
+        cls = classes.draw(lambda c: c not in song_cls or
+                           subs[c].can(lambda r: r["song"] in here))
+        synced = {}
+        if cls in song_cls:
+            for b in sorted(here):
+                r = subs[cls].draw(lambda r: r["song"] == b)
+                if r is not None:
+                    synced[b] = r
+            cls = fallback
+        rot.use(cls)
         v = build_vod(group, ident, rot, rng, avoid_last=avoid, synced=synced)
         renders = list(dict.fromkeys(names[s["src"]] for s in v["edl"] if s["kind"] == "piece"))
         vods.append({"index": k, "file": f"vod-{k:03d}.mp4",
@@ -381,7 +415,8 @@ def _load_catalog(path: str) -> dict:
         f_path = resolve_media(e["file"], here)
         item = {"src": f_path, "dur": ffprobe_duration(f_path)}
         if key in ("pieces", "songs"):
-            item.update(model=e.get("model", os.path.splitext(os.path.basename(f_path))[0]))
+            item.update(model=e.get("model", os.path.splitext(os.path.basename(f_path))[0]),
+                        preset=e.get("preset", ""))
             if e.get("title"):
                 item["title"] = e["title"]
             if key == "songs":

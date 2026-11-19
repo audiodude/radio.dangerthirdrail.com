@@ -133,24 +133,30 @@ def test_bag_draws_exact_shares_per_refill_and_keeps_skipped_marbles():
     picks = [bag.draw(lambda x: x == "a") for _ in range(2)] + [bag.draw() for _ in range(6)]
     assert sorted(picks) == ["a"] * 2 + ["b"] * 6             # skipped b's stayed in the bag
 
-WEIGHTS = {"hydra": {"weight": 1, "models": {"hydra": {"presets": {"cells": 3, "fold": 1}}}},
+WEIGHTS = {"other": {"weight": 1, "models": {"weave": {"presets": {"cells": 3, "fold": 1}}}},
            "godot": {"weight": 2, "default": True,
                      "models": {"fluid_swirl": {"weight": 1}, "metro_rise": {"weight": 3}}}}
 
-def test_piece_bags_nest_class_then_model_then_preset():
+def test_class_per_stretch_then_model_then_preset():
     lib = [_song(i, 150.0) for i in range(600)]
-    pieces = [_piece("h_cells_1.mp4", 600.0, "hydra", preset="cells"),
-              _piece("h_cells_2.mp4", 600.0, "hydra", preset="cells"),
-              _piece("h_fold.mp4", 600.0, "hydra", preset="fold"),
+    pieces = [_piece("w_cells_1.mp4", 600.0, "weave", preset="cells"),
+              _piece("w_cells_2.mp4", 600.0, "weave", preset="cells"),
+              _piece("w_fold.mp4", 600.0, "weave", preset="fold"),
               _piece("fs.mp4", 600.0, "fluid_swirl", preset="aurora"),
               _piece("mr.mp4", 600.0, "metro_rise", preset="century"),
               _piece("pc.mp4", 600.0, "peg_cascade", preset="zen")]    # unlisted -> godot
-    srcs = _pieces_in_order(_set(lib, pieces, weights=WEIGHTS))
-    share = lambda *names: sum(srcs.count(n) for n in names) / len(srcs)
-    assert abs(share("h_cells_1.mp4", "h_cells_2.mp4", "h_fold.mp4") - 1 / 3) < 0.04
-    assert abs(share("h_fold.mp4") - 1 / 12) < 0.03            # 1/3 hydra x 1/4 fold
-    assert abs(share("mr.mp4") - 2 / 3 * 3 / 5) < 0.04         # 2/3 godot x 3/5 metro_rise
-    assert abs(share("pc.mp4") - 2 / 3 * 1 / 5) < 0.04         # default class, weight 1
+    vods = _set(lib, pieces, weights=WEIGHTS)["vods"]
+    segs = [[s["src"] for s in v["edl"] if s["kind"] == "piece"] for v in vods]
+    other = [v for v in segs if v[0].startswith("w_")]
+    assert all(all(s.startswith("w_") for s in v) for v in other)   # one class per stretch
+    assert abs(len(other) / len(vods) - 1 / 3) < 0.03
+    o = [s for v in other for s in v]
+    g = [s for v in segs if not v[0].startswith("w_") for s in v]
+    assert abs(o.count("w_fold.mp4") / len(o) - 1 / 4) < 0.05       # cells 3 : fold 1
+    # metro_rise 3 of 5, minus what never-twice-in-a-row costs it; unlisted pc weighs 1
+    assert abs(g.count("mr.mp4") / len(g) - 3 / 5) < 0.09
+    assert abs(g.count("pc.mp4") / len(g) - 1 / 5) < 0.05
+    srcs = [s for v in segs for s in v]
     assert all(a != b for a, b in zip(srcs, srcs[1:] + srcs[:1]))
 
 def test_zero_weight_keeps_pieces_off_air():
@@ -215,34 +221,44 @@ def test_resolve_media_prefers_sibling_of_catalog(tmp_path):
 def _hashed(i, dur=200.0):
     return {**_song(i, dur), "sha256": f"sha{i}"}
 
-def _song_render(i, dur, sha=None, **kw):
-    return {"src": f"hydra_s{i:03d}.mp4", "dur": dur, "model": "hydra", "title": "Hydra Glass",
-            "song": f"s{i:03d}.mp3", "song_sha256": sha or f"sha{i}", **kw}
+def _song_render(i, dur, sha=None, preset="glass", **kw):
+    return {"src": f"hydra_{preset}_s{i:03d}.mp4", "dur": dur, "model": "hydra", "preset": preset,
+            "title": f"Hydra {preset.title()}", "song": f"s{i:03d}.mp3",
+            "song_sha256": sha or f"sha{i}", **kw}
+
+HYDRA_W = {"hydra": {"weight": 1, "models": {"hydra": {}}}, "godot": {"weight": 2, "default": True}}
+
+def _song_set(lib, renders, idents=IDENTS, seed=20261113):
+    return plan.build_set({"pieces": [_piece(f"p{i}.mp4", 600.0) for i in range(4)],
+                           "idents": idents, "songs": renders}, lib,
+                          {"seed": seed, "swap_at": "x", "fps": 60, "resolution": "1920x1080",
+                           "weights": HYDRA_W})
+
+def _over(v, m):
+    return [s for s in v["edl"][1:] if s["tl_start"] < m["end"] - 1e-6
+            and s["tl_start"] + s["out"] > m["start"] + 1e-6]
 
 
-def test_song_renders_play_over_exactly_their_song():
+def test_hydra_stretches_play_each_rendered_song_its_own_render():
     # every other song has a render, plus one 700 s song (past MAX_SEG)
     lib = [_hashed(i, 150.0 + 11 * (i % 9)) for i in range(40)] + [_hashed(99, 700.0)]
     renders = [_song_render(i, s["dur"] + 0.02) for i, s in enumerate(lib[:40]) if i % 2 == 0]
     renders.append(_song_render(99, 700.02))
     by_song = {r["song"]: r for r in renders}
-    pieces = [_piece(f"p{i}.mp4", 600.0) for i in range(4)]
     for idents in ([IDENTS[0]], [IDENTS[3]]):              # audio pre-roll, silent overlay
-        p = plan.build_set({"pieces": pieces, "idents": idents, "songs": renders}, lib,
-                           {"seed": 20261113, "swap_at": "x", "fps": 60, "resolution": "1920x1080"})
         openings = []
-        for v in p["vods"]:
+        for v in _song_set(lib, renders, idents)["vods"]:
             t = 0.0
             for seg in v["edl"]:                            # still contiguous
                 assert abs(seg["tl_start"] - t) < 0.01
                 t = seg["tl_start"] + seg["out"]
             assert abs(t - v["dur"]) < 0.01
+            hydra = any(s.get("synced") for s in v["edl"])
             vis = v["edl"][0]["out"]
             for m in v["music"]:
-                over = [s for s in v["edl"][1:] if s["tl_start"] < m["end"] - 1e-6
-                        and s["tl_start"] + s["out"] > m["start"] + 1e-6]
+                over = _over(v, m)
                 r = by_song.get(os.path.basename(m["file"]))
-                if r is None:
+                if r is None or not hydra:                  # godot pieces, never a render
                     assert not any(s.get("synced") or s["src"].startswith("hydra_") for s in over)
                     continue
                 assert [s["src"] for s in over] == [r["src"]] and over[0]["synced"]
@@ -251,11 +267,32 @@ def test_song_renders_play_over_exactly_their_song():
                 assert abs(over[0]["tl_start"] + over[0]["out"] - m["end"]) < 1e-6
                 openings.append(over[0]["in"])
                 assert "Hydra Glass" in v["description"]
-        assert len(openings) == len(renders)                # every render aired
+        assert openings
         if idents[0].get("audio"):
             assert set(openings) == {0.0}                   # music starts after the ident
         else:
             assert 12.0 in openings                         # ident covers song 1's opening
+
+def test_hydra_gets_its_class_share_of_stretches_and_waits_for_rendered_songs():
+    lib = [_hashed(i, 150.0) for i in range(600)]
+    full = [_song_render(i, 150.02, preset=pr) for i in range(600) for pr in ("glass", "fold")]
+    vods = _song_set(lib, full)["vods"]
+    hydra = [v for v in vods if any(s.get("synced") for s in v["edl"])]
+    assert abs(len(hydra) / len(vods) - 1 / 3) < 0.03       # godot:hydra 2:1
+    srcs = [s["src"] for v in hydra for s in v["edl"] if s.get("synced")]
+    assert abs(sum("_fold_" in s for s in srcs) / len(srcs) - 0.5) < 0.08
+    # a sixth of songs rendered: hydra only lands on stretches holding one, and the
+    # waiting marbles still bring it near its share
+    part = [_song_render(i, 150.02) for i in range(0, 600, 6)]
+    vods = _song_set(lib, part)["vods"]
+    hydra = [v for v in vods if any(s.get("synced") for s in v["edl"])]
+    assert 0.2 < len(hydra) / len(vods) < 0.34
+    assert all(any(_over(v, m) and _over(v, m)[0].get("synced") for m in v["music"]) for v in hydra)
+
+def test_no_song_renders_means_all_godot():
+    lib = [_hashed(i, 150.0) for i in range(60)]
+    vods = _song_set(lib, [])["vods"]
+    assert not any(s.get("synced") or s["src"].startswith("hydra_") for v in vods for s in v["edl"])
 
 
 def test_only_fresh_complete_song_renders_are_used():
@@ -263,9 +300,9 @@ def test_only_fresh_complete_song_renders_are_used():
     renders = [_song_render(0, 200.02, sha="re-trimmed since"),
                _song_render(1, 199.0),                      # doesn't cover the song
                _song_render(2, 200.02),
+               _song_render(2, 200.02, preset="fold"),      # a second version of song 2
                _song_render(3, 200.02, src="old.mp4", rendered_at="2026-11-01T00:00:00Z"),
                _song_render(3, 200.02, src="new.mp4", rendered_at="2026-11-07T00:00:00Z"),
                _song_render(9, 300.0)]                      # song not in the library
-    synced = plan.match_song_renders(renders, lib)
-    assert {k: r["src"] for k, r in synced.items()} == {"s002.mp3": "hydra_s002.mp4",
-                                                        "s003.mp3": "new.mp4"}
+    assert sorted(r["src"] for r in plan.match_song_renders(renders, lib)) == \
+        ["hydra_fold_s002.mp4", "hydra_glass_s002.mp4", "new.mp4"]

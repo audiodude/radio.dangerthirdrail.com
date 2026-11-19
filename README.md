@@ -84,7 +84,8 @@ scripts/render/upload_catalog.sh ./catalog_1080 s3://bucket/catalog/
   **Rotation** below).
 - Renders are serialized (one GPU), idempotent (existing mp4s are skipped, writes are
   atomic), and run about **6× realtime on a 3080 Ti** (~29 min per 300 s piece, encode included).
-- **Hydra** (original Hydra sketches; presets `glass`, `fold`, `slices`; spec `hydra.json`)
+- **Hydra** (original Hydra sketches; presets `glass`, `fold`, `slices`) is audio-reactive, so
+  it airs only as song renders (below), never as fixed-length pieces. It
   renders through vxstory's own `hydra/render.mjs` in headless GPU Chromium instead of
   Godot. `render_piece.sh` picks it whenever the model dir has a `render.mjs`, runs Node
   from the model dir (so asdf resolves that dir's version) and refuses Node < 24. One-time
@@ -197,25 +198,30 @@ week's set can always be re-derived.
   long enough; otherwise it's cut.
 - **10-minute cap**: no piece stays on screen longer than `MAX_SEG` (600 s). A longer
   stretch is always cut, and a song that would still outrun the cap cuts mid-song.
-- **Rotation**: pieces come from nested bags, **class → model → preset → piece**, weighted
-  by [`scripts/bake/weights.json`](scripts/bake/weights.json):
+- **Visuals**: each stretch first draws a **class** from the class bag in
+  [`scripts/bake/weights.json`](scripts/bake/weights.json), then fills it from that
+  class's own nested bags, **model → preset → item**:
 
   ```json
-  {"hydra": {"weight": 1, "models": {"hydra": {"weight": 1, "presets": {"cells": 1, "fold": 1}}}},
-   "godot": {"weight": 3, "default": true, "models": {"metro_rise": {"weight": 2}}}}
+  {"hydra": {"weight": 1, "models": {"hydra": {"weight": 1, "presets": {"glass": 1, "fold": 1}}}},
+   "godot": {"weight": 2, "default": true, "models": {"metro_rise": {"weight": 2}}}}
   ```
 
-  Here hydra gets 1 draw in 4 and godot 3, then metro_rise gets 2 of godot's model marbles
-  to every other model's 1. Weights are whole numbers; anything left out is `1`, `0` takes
-  it off air. Models not listed go to the `default` class. Every piece of a preset gets one
-  marble. A slot only draws a piece long enough for it (the rest stay in the bag for
-  later), never the same piece twice in a row, even across VODs and the loop seam. Each
-  segment starts at a random in-point. `plan.py --weights` overrides the file.
-- **Song renders**: a song with a song render gets it under the whole song, from its
-  first frame (a silent ident covers the opening), with no cap and no random in-point.
-  Only the songs around it are drawn uncut/cut from the rotation. A render whose song's
-  sha256 no longer matches the library, or that is shorter than the song, is dropped with
-  a log line and the song gets rotation pieces instead.
+  Here a stretch is hydra 1 time in 3 and godot 2, and metro_rise gets 2 of godot's model
+  marbles to every other model's 1. Weights are whole numbers; anything left out is `1`, `0`
+  takes it off air. Models not listed go to the `default` class. A class holds either
+  pieces or song renders, never both.
+  - **Piece class (godot)**: uncut/cut as above. A slot only draws a piece long enough for
+    it (the rest stay in the bag), never the same piece twice in a row, even across VODs
+    and the loop seam. Each segment starts at a random in-point.
+  - **Song-render class (hydra)**: each song with a render gets one of its renders (drawn
+    by preset) under the whole song, from its first frame (a silent ident covers the
+    opening), with no cap and no random in-point. Songs in the stretch without a render get
+    pieces from the `default` class. A stretch with no rendered song can't draw hydra; the
+    marble stays in the bag for a later stretch, so hydra keeps near its share while only
+    part of the library is rendered. A render whose song's sha256 no longer matches the
+    library, or that is shorter than the song, is dropped with a log line.
+  - `plan.py --weights` overrides the file.
 - **Titles**: each song's name is burned in as a `♪ Song Title` ASS subtitle that fades in
   and out. The VOD's YouTube title is `Song A / Song B (Render, Render)` (≤ 100 chars:
   every song kept, renders truncated with `...`); the description is the station blurb
