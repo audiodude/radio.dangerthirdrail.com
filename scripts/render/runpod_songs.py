@@ -405,6 +405,11 @@ class Pod:
                         log(f"upload after failure: {e2}", self.tag)
         else:
             log("shard done", self.tag)
+        # Free the pod now, not when the slowest shard ends: an idle pod still bills.
+        # (After an interrupt the main thread's cleanup deletes every pod instead.)
+        if self.id and not STOP.is_set() and not (self.error and self.host
+                                                  and self.args.keep_on_failure):
+            self.delete()
 
 
 def s3_parts(uri):
@@ -591,7 +596,7 @@ def main():
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             signal.signal(sig, signal.SIG_IGN)
         for p in pods:
-            if p.id is None:
+            if p.id is None or p.deleted:
                 continue
             # Only a pod that got as far as SSH is worth keeping for inspection
             if p.error and p.host and a.keep_on_failure and not interrupted:
